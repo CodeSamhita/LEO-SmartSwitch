@@ -17,6 +17,8 @@ import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.action.ActionCallback
 import androidx.glance.appwidget.action.actionRunCallback
 import androidx.glance.appwidget.cornerRadius
+import androidx.glance.appwidget.lazy.LazyColumn
+import androidx.glance.appwidget.lazy.itemsIndexed
 import androidx.glance.appwidget.provideContent
 import androidx.glance.background
 import androidx.glance.layout.Alignment
@@ -42,13 +44,18 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
-private val BG = Color(0xFF0A0D10)
+// Matches the app's "moondust" palette (colors.xml) - the widget previously
+// used its own hand-picked colors that had drifted from the app's actual
+// branding (e.g. a generic red instead of moondust_danger).
+private val BG = Color(0xFF070A0D)          // moondust_bg
 private val SURFACE = Color(0xFF161B22)
-private val ACCENT = Color(0xFF00F2FF)
-private val ON_ACCENT = Color(0xFF003135)
+private val ACCENT = Color(0xFF22E8E0)      // moondust_accent
+private val ON_ACCENT = Color(0xFF04201E)   // on_accent_text
 private val OFF = Color(0xFF21262D)
-private val TXT = Color(0xFFF0F4F8)
-private val MUT = Color(0xFF7E8C9A)
+private val TXT = Color(0xFFEAF2F7)         // moondust_text_primary
+private val MUT = Color(0xFF8B9AA8)         // moondust_text_secondary
+private val DANGER = Color(0xFFFF5A6E)      // moondust_danger
+private const val MAX_WIDGET_DEVICES = 6    // bounded so background refresh stays cheap
 
 val KEY_ID = ActionParameters.Key<String>("id")
 val KEY_IDX = ActionParameters.Key<Int>("idx")
@@ -58,8 +65,8 @@ val KEY_MASTER_ON = ActionParameters.Key<Boolean>("master_on")
 class LeoWidget : GlanceAppWidget() {
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val store = DeviceStore(context)
-        val devices = store.getDevices().take(2)
-        
+        val devices = store.getDevices().take(MAX_WIDGET_DEVICES)
+
         val states = coroutineScope {
             devices.map { d ->
                 async { d to DeviceApi.state(d.baseUrl(), d.token) }
@@ -103,9 +110,15 @@ class LeoWidget : GlanceAppWidget() {
                     return@Column
                 }
 
-                states.forEachIndexed { idx, (device, state) ->
-                    DeviceRow(device, state)
-                    if (idx < states.size - 1) Spacer(GlanceModifier.height(12.dp))
+                // LazyColumn scrolls instead of clipping once there are more
+                // devices than fit the widget's current (possibly resized) size -
+                // a plain Column here previously just capped at 2 devices total.
+                LazyColumn(GlanceModifier.fillMaxWidth().defaultWeight()) {
+                    itemsIndexed(states) { idx, (device, state) ->
+                        Column(GlanceModifier.fillMaxWidth().padding(bottom = if (idx < states.size - 1) 12.dp else 0.dp)) {
+                            DeviceRow(device, state)
+                        }
+                    }
                 }
             }
         }
@@ -145,7 +158,7 @@ class LeoWidget : GlanceAppWidget() {
                 }
                 Box(
                     GlanceModifier.width(8.dp).height(8.dp).cornerRadius(4.dp)
-                        .background(if (state != null) ACCENT else Color.Red)
+                        .background(if (state != null) ACCENT else DANGER)
                 ) {}
             }
             

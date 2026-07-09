@@ -9,6 +9,12 @@ toggles. No cloud, no account.
 > (see below) — a compiled `.apk` can't be produced outside an Android SDK.
 
 ## What changed in this pass
+- **Widget improvements.** The home-screen widget used its own hand-picked
+  colors that had drifted from the app's actual "moondust" palette (including
+  a generic red instead of `moondust_danger` for the offline dot) — now
+  matches exactly. It also hard-capped at 2 devices with no way to see more;
+  it now fetches up to 6 and shows them in a scrollable `LazyColumn`, so
+  devices beyond the first couple are reachable instead of invisible.
 - **Removed dead code.** `SettingsActivity.kt` was an orphaned, unregistered
   screen with a broken reference (`R.string.add_btn`, which didn't exist —
   it wouldn't compile) that duplicated `AddDeviceActivity` with a different,
@@ -90,6 +96,7 @@ app/src/main/res/
 ## Notes
 - mDNS discovery resolves to a numeric IP; `.local` names don't always resolve
   through `HttpURLConnection`, so enter the IP if discovery is blocked.
-- The widget shows up to 2 devices and refreshes on tap + every ~30 min (the
-  Android minimum); the in-app screens are the live, real-time view.
+- The widget shows up to 6 devices (scroll if you have more) and refreshes on
+  tap + every ~30 min (the Android minimum); the in-app screens are the live,
+  real-time view.
 - The mDNS service type `_leoswitch._tcp` must match the firmware.
