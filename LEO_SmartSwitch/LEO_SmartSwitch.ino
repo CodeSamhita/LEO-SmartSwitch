@@ -28,7 +28,25 @@
 #include <esp_sntp.h>
 #include <mbedtls/sha256.h>
 #include <time.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "config.h"
+
+/* ============================ CONCURRENCY ============================
+   AsyncWebServer/AsyncTCP callbacks (HTTP + WS handlers) all run
+   sequentially on one dedicated AsyncTCP task (pinned via
+   CONFIG_ASYNC_TCP_RUNNING_CORE=0), so handler-vs-handler access is
+   already serialized. The one real race is that task vs. the separate
+   main Arduino loop() task, whenever both touch the same shared array or
+   struct field. A real FreeRTOS mutex (not a spinlock/critical section)
+   is used - it's safe to hold across String/heap work, unlike
+   portENTER_CRITICAL, which must never wrap anything that can block.
+   RAII guard so a lock is never left held on an early return. */
+SemaphoreHandle_t stateLock = nullptr;
+struct LockGuard {
+  LockGuard() { xSemaphoreTake(stateLock, portMAX_DELAY); }
+  ~LockGuard() { xSemaphoreGive(stateLock); }
+};
 
 /* ============================== STATE ============================== */
 struct RelayCh {
@@ -73,6 +91,7 @@ int      badHealth    = 0;        // consecutive failed health checks
 uint32_t staGoodMs    = 0;        // last time STA was verified healthy
 uint32_t lastTick     = 0;
 uint32_t lastEnergyFlush = 0;
+uint32_t lastLogPrune = 0;
 uint32_t lastClockPersist = 0;
 bool   apActive       = false;
 
@@ -206,6 +225,8 @@ void relaySet(int i, bool on) {
 }
 
 /* ============================ ENERGY =============================== */
+// Only ever called from energyAccrue() below, which already holds stateLock -
+// do not call this from anywhere else without taking the lock first.
 DayBucket* energyToday() {
   String d = nowDate();
   for (int i = 0; i < energyCount; ++i) if (energyDays[i].date == d) return &energyDays[i];
@@ -224,7 +245,10 @@ void energyAccrue(int i) {
   RelayCh& r = cfg.relay[i];
   if (r.on && r.watts > 0) {
     double hrs = (now - r.lastAccrueMs) / 3600000.0;
-    if (hrs > 0) { DayBucket* b = energyToday(); b->wh[i] += r.watts * hrs; }
+    if (hrs > 0) {
+      LockGuard g;                                    // energyDays[] is read/written from both loop() and async handlers
+      DayBucket* b = energyToday(); b->wh[i] += r.watts * hrs;
+    }
   }
   r.lastAccrueMs = now;
 }
@@ -233,10 +257,12 @@ void energyAccrueAll() { for (int i = 0; i < RELAY_COUNT; ++i) energyAccrue(i); 
 void energySave() {
   energyAccrueAll();
   JsonDocument doc; JsonArray a = doc["days"].to<JsonArray>();
-  for (int i = 0; i < energyCount; ++i) {
-    JsonObject o = a.add<JsonObject>(); o["d"] = energyDays[i].date;
-    JsonArray w = o["wh"].to<JsonArray>();
-    for (int r = 0; r < RELAY_COUNT; ++r) w.add(energyDays[i].wh[r]);
+  { LockGuard g;
+    for (int i = 0; i < energyCount; ++i) {
+      JsonObject o = a.add<JsonObject>(); o["d"] = energyDays[i].date;
+      JsonArray w = o["wh"].to<JsonArray>();
+      for (int r = 0; r < RELAY_COUNT; ++r) w.add(energyDays[i].wh[r]);
+    }
   }
   File f = LittleFS.open(ENERGY_FILE, "w"); if (f) { serializeJson(doc, f); f.close(); }
 }
@@ -507,6 +533,7 @@ bool canonicalOwner() {
   if (cfg.mdnsHost.length()) return false;            // explicit override -> not in election
   bool selfMaster = (cfg.role == "master");
   String bestMaster = selfMaster ? gId : "";
+  LockGuard g;                                        // peers[] is also touched from loop()
   for (int i = 0; i < peerCount; ++i) {
     if (!peers[i].cap) continue;
     if (peers[i].role == "master" && (bestMaster == "" || peers[i].id < bestMaster))
@@ -563,6 +590,7 @@ void peerUpsert(JsonDocument& d, const String& fromIp) {
   String id = d["id"] | "";
   if (!id.length() || id == gId) return;               // ignore self / junk
   if (String(d["type"] | "") != DEVICE_TYPE) return;   // only smart switches
+  LockGuard g;                                         // peers[] is also read/written from loop()
   for (int i = 0; i < peerCount; ++i) {
     if (peers[i].id == id) {                            // refresh existing
       peers[i].name = d["name"] | peers[i].name;
@@ -573,8 +601,16 @@ void peerUpsert(JsonDocument& d, const String& fromIp) {
       peers[i].lastSeen = millis(); return;
     }
   }
-  if (peerCount >= MAX_PEERS) return;
-  Peer& p = peers[peerCount++];
+  int slot;
+  if (peerCount < MAX_PEERS) {
+    slot = peerCount++;
+  } else {
+    // full: evict the least-recently-seen peer rather than silently
+    // dropping a newly-discovered one forever.
+    slot = 0;
+    for (int i = 1; i < peerCount; ++i) if (peers[i].lastSeen < peers[slot].lastSeen) slot = i;
+  }
+  Peer& p = peers[slot];
   p.id = id; p.name = d["name"] | id; p.ip = d["ip"] | fromIp;
   p.role = d["role"] | ""; p.group = d["group"] | ""; p.type = DEVICE_TYPE;
   p.fw = d["fw"] | ""; p.port = d["port"] | 80; p.cap = d["cap"] | true; p.lastSeen = millis();
@@ -582,6 +618,7 @@ void peerUpsert(JsonDocument& d, const String& fromIp) {
 }
 void peerPrune() {
   uint32_t now = millis();
+  LockGuard g;                                         // peers[] is also read/written from async handlers
   for (int i = peerCount - 1; i >= 0; --i) {
     if (now - peers[i].lastSeen > PEER_TIMEOUT_MS) {
       dbg("Peer timed out: " + peers[i].id);
@@ -736,11 +773,18 @@ void wifiBegin() {
 }
 void wifiForceReconnect(const char* why) {
   logEvent("ERR", String("WiFi recovery: ") + why);
+  // Snapshot into locals under the lock rather than reading cfg.staSsid's
+  // buffer directly at the WiFi.begin() call sites below: an async handler
+  // (/api/network) can reassign that String concurrently, which frees its
+  // old heap buffer - reading through a stale .c_str() pointer at that
+  // moment is a use-after-free, not just a stale value.
+  String ssid, pass;
+  { LockGuard g; ssid = cfg.staSsid; pass = cfg.staPass; }
   if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
   apStart();                                   // make sure user still has the AP
   WiFi.disconnect();                           // drop the wedged association
   WiFi.setTxPower(WIFI_TX_POWER);
-  WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.c_str());
+  WiFi.begin(ssid.c_str(), pass.c_str());
   lastStaTry = millis();
   ledState = LED_CONNECTING;
 }
@@ -764,6 +808,10 @@ void wifiTick() {
     lastStaTry = millis();
     if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
     apStart();                                 // AP stays up while we retry
+    // Snapshot once, under the lock (see wifiForceReconnect for why), and
+    // reuse the same copy for both begin() calls below.
+    String ssid, pass;
+    { LockGuard g; ssid = cfg.staSsid; pass = cfg.staPass; }
     // A bare repeat WiFi.begin() after a failed/absent-AP attempt is silently
     // ignored by the IDF driver (it needs its connect state machine reset).
     // Without this disconnect, a device that boots before its router is up
@@ -771,15 +819,15 @@ void wifiTick() {
     // forever even once the SSID is broadcasting again.
     WiFi.disconnect();
     WiFi.setTxPower(WIFI_TX_POWER);
-    WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.c_str());
-    dbg("WiFi retry: joining " + cfg.staSsid);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    dbg("WiFi retry: joining " + ssid);
     // If we've been down a long time, a full radio reset clears deeper wedges.
     if (staDownSince == 0) staDownSince = millis();
     if (millis() - staDownSince > 120000) {    // 2 min of failure -> hard reset radio
       staDownSince = millis();
       dbg("WiFi hard reset: 2 min without a connection");
       WiFi.disconnect(true); delay(20); WiFi.mode(WIFI_AP_STA); apStart();
-      WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.c_str());
+      WiFi.begin(ssid.c_str(), pass.c_str());
     }
   }
 }
@@ -845,7 +893,7 @@ void onJsonAll(AsyncWebServerRequest* req, JsonVariant& json) {
 }
 void onJsonNetwork(AsyncWebServerRequest* req, JsonVariant& json) {
   if (!checkAuth(req)) return sendUnauth(req);
-  cfg.staSsid = json["ssid"] | ""; cfg.staPass = json["pass"] | "";
+  { LockGuard g; cfg.staSsid = json["ssid"] | ""; cfg.staPass = json["pass"] | ""; }
   configSave(); req->send(200, "application/json", "{\"ok\":1}");
   delay(200); ESP.restart();
 }
@@ -1007,11 +1055,13 @@ void webBegin() {
     me["id"] = gId; me["name"] = gName; me["ip"] = WiFi.localIP().toString();
     me["port"] = 80; me["role"] = cfg.role; me["group"] = cfg.group;
     me["type"] = DEVICE_TYPE; me["fw"] = FW_VERSION; me["self"] = true;
-    for (int i = 0; i < peerCount; ++i) {
-      JsonObject o = a.add<JsonObject>();
-      o["id"] = peers[i].id; o["name"] = peers[i].name; o["ip"] = peers[i].ip;
-      o["port"] = peers[i].port; o["role"] = peers[i].role; o["group"] = peers[i].group;
-      o["type"] = peers[i].type; o["fw"] = peers[i].fw; o["self"] = false;
+    { LockGuard g;                                    // peers[] is also written from loop()
+      for (int i = 0; i < peerCount; ++i) {
+        JsonObject o = a.add<JsonObject>();
+        o["id"] = peers[i].id; o["name"] = peers[i].name; o["ip"] = peers[i].ip;
+        o["port"] = peers[i].port; o["role"] = peers[i].role; o["group"] = peers[i].group;
+        o["type"] = peers[i].type; o["fw"] = peers[i].fw; o["self"] = false;
+      }
     }
     String out; serializeJson(d, out); r->send(200, "application/json", out);
   });
@@ -1076,11 +1126,13 @@ void webBegin() {
     JsonDocument d; d["tariff"] = cfg.tariff;
     JsonArray names = d["names"].to<JsonArray>(); for (int i = 0; i < RELAY_COUNT; ++i) names.add(cfg.relay[i].name);
     JsonArray a = d["days"].to<JsonArray>();
-    for (int i = 0; i < energyCount; ++i) {
-      JsonObject o = a.add<JsonObject>(); o["d"] = energyDays[i].date;
-      double tot = 0; JsonArray w = o["wh"].to<JsonArray>();
-      for (int rr = 0; rr < RELAY_COUNT; ++rr) { w.add(energyDays[i].wh[rr]); tot += energyDays[i].wh[rr]; }
-      o["kwh"] = tot / 1000.0; o["cost"] = (tot / 1000.0) * cfg.tariff;
+    { LockGuard g;                                    // energyDays[] is also written from loop()
+      for (int i = 0; i < energyCount; ++i) {
+        JsonObject o = a.add<JsonObject>(); o["d"] = energyDays[i].date;
+        double tot = 0; JsonArray w = o["wh"].to<JsonArray>();
+        for (int rr = 0; rr < RELAY_COUNT; ++rr) { w.add(energyDays[i].wh[rr]); tot += energyDays[i].wh[rr]; }
+        o["kwh"] = tot / 1000.0; o["cost"] = (tot / 1000.0) * cfg.tariff;
+      }
     }
     String out; serializeJson(d, out); r->send(200, "application/json", out);
   });
@@ -1125,6 +1177,7 @@ void webBegin() {
 
 /* ============================ SETUP =============================== */
 void setup() {
+  stateLock = xSemaphoreCreateMutex();  // before anything else can touch shared state
   Serial.begin(115200);
   setCpuFrequencyMhz(CPU_MHZ);        // run cooler; 80 MHz is ample for the web server
   pix.begin(); pix.setBrightness(NEOPIXEL_BRIGHT); ledState = LED_BOOT; ledTick();
@@ -1170,6 +1223,10 @@ void loop() {
 
   if (millis() - lastTick >= TICK_PUSH_MS) { lastTick = millis(); pushTelemetry(); }
   if (millis() - lastEnergyFlush >= ENERGY_FLUSH_MS) { lastEnergyFlush = millis(); energySave(); }
+  // logPrune() also runs once at boot, but the clock isn't synced yet at that
+  // point so its age-based cutoff is a no-op there; this periodic call is
+  // what actually enforces the 90-day retention once NTP has synced.
+  if (millis() - lastLogPrune >= LOG_PRUNE_MS) { lastLogPrune = millis(); logPrune(); }
   if (millis() - lastClockPersist >= CLOCK_PERSIST_MS) { lastClockPersist = millis(); if (timeSynced) clockPersist(); }
   if (ssdpUp && millis() - lastNotify >= 300000) { lastNotify = millis(); ssdpNotify(); }
   if (beaconUp && millis() - lastBeacon >= BEACON_MS) { lastBeacon = millis(); beaconAnnounce(); peerPrune(); }

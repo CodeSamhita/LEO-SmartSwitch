@@ -48,9 +48,14 @@ class MainActivity : GlassActivity() {
         store.getDevices().forEach { LiveManager.connect(it) }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        if (isFinishing) LiveManager.disconnectAll()
+    // Was only disconnecting in onDestroy() when finishing, so backgrounding
+    // the app (Home button, screen off, switching apps) left every saved
+    // device's WebSocket open indefinitely - onPause() always precedes
+    // onDestroy(), so this covers both cases. onResume() reconnects whatever
+    // is actually needed when the dashboard becomes visible again.
+    override fun onPause() {
+        super.onPause()
+        LiveManager.disconnectAll()
     }
 
     private fun buildHeader() {

@@ -20,8 +20,15 @@ class DeviceStore(context: Context) {
                     host = o.getString("host"),
                     port = o.getInt("port"),
                     name = o.getString("name"),
-                    token = o.optString("token").ifEmpty { null },
-                    cachedRelays = o.optString("relays").ifEmpty { null }
+                    // isNull() first: a JSONObject.put(key, null) can round-trip
+                    // through org.json as either a missing key or a literal JSON
+                    // null depending on version, and optString() on a JSON null
+                    // can return the 4-character string "null" rather than "" -
+                    // which ifEmpty{null} would NOT catch, silently turning a
+                    // device with no login configured into one sending a literal
+                    // "X-Auth-Token: null" header on every request.
+                    token = if (o.isNull("token")) null else o.optString("token").ifEmpty { null },
+                    cachedRelays = if (o.isNull("relays")) null else o.optString("relays").ifEmpty { null }
                 )
             }
         }.getOrDefault(emptyList())

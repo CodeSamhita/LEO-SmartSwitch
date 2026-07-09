@@ -9,6 +9,20 @@ toggles. No cloud, no account.
 > (see below) — a compiled `.apk` can't be produced outside an Android SDK.
 
 ## What changed in this pass
+- **Fixed a WebSocket leak.** `MainActivity` reconnected every saved device's
+  telemetry socket on every `onResume()` but only disconnected them in
+  `onDestroy()` when the Activity was actually finishing - backgrounding the
+  app (Home button, screen off, switching apps) left every device's socket
+  open indefinitely. `DeviceDetailActivity` connected once in `onCreate()`
+  and never disconnected at all, even when navigating away to a sub-screen.
+  Both now connect in `onResume()` and disconnect in `onPause()`, so a
+  connection only stays open while its screen is actually visible.
+- **Hardened saved-device token deserialization.** A `null` token could
+  round-trip through `org.json` as the literal string `"null"` rather than
+  Kotlin `null` depending on library version, which would send a real
+  `X-Auth-Token: null` header on every request for devices with no login
+  configured. Now checks `isNull()` explicitly rather than relying on
+  empty-string coercion.
 - **Widget improvements.** The home-screen widget used its own hand-picked
   colors that had drifted from the app's actual "moondust" palette (including
   a generic red instead of `moondust_danger` for the offline dot) — now

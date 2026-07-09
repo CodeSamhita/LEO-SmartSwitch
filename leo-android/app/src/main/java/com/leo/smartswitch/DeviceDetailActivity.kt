@@ -91,7 +91,6 @@ class DeviceDetailActivity : GlassActivity() {
 
         lifecycleScope.launch {
             val d = device() ?: return@launch
-            LiveManager.connect(d)
             DeviceApi.state(d)?.let { updateUi(it) }
             // mDNS isn't in /api/state, so fetch it once here rather than on
             // every telemetry tick (updateUi runs ~1/s from the WebSocket).
@@ -100,6 +99,20 @@ class DeviceDetailActivity : GlassActivity() {
         lifecycleScope.launch {
             LiveManager.updates.filter { it.id == deviceId }.collect { updateUi(it) }
         }
+    }
+
+    // Connect while this screen is actually visible, disconnect otherwise -
+    // previously only connected once in onCreate() and never disconnected,
+    // so the socket stayed open even after navigating to a sub-screen or
+    // backgrounding the app.
+    override fun onResume() {
+        super.onResume()
+        device()?.let { LiveManager.connect(it) }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        deviceId?.let { LiveManager.disconnect(it) }
     }
 
     private fun open(cls: Class<*>) =

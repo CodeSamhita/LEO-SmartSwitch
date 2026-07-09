@@ -1,5 +1,30 @@
 # LEO Smart Switch — ESP32-C3 (Phase 1)
 
+## What's new (v1.4.2 — full-codebase bug audit)
+- **Fixed real cross-task race conditions.** HTTP/WS handlers run on the
+  AsyncTCP task while `loop()` runs on the main Arduino task - several
+  shared globals were read/written from both with no protection: the peer
+  table (`peers[]`), the energy history (`energyDays[]`), and the WiFi
+  credentials (`cfg.staSsid`/`cfg.staPass`, an Arduino `String` - a
+  concurrent reassignment there is a use-after-free of its old buffer, not
+  just a stale value). Added a real FreeRTOS mutex (safe to hold across
+  String work, unlike a spinlock) with an RAII guard so a lock can't be
+  left held on an early return, and applied it to all of these. This is
+  scoped to the highest-severity fields, not every `cfg` field - a full
+  rewrite of every shared String to a lock-free design is a larger change
+  than is safe to make without a compiler to verify it.
+- **Fixed: log pruning never actually ran.** `logPrune()` was called exactly
+  once, at boot, *before* the clock syncs - so its age-based 90-day cutoff
+  was always a no-op, and it never ran again afterward. Now also runs
+  periodically from `loop()`.
+- **Peer table: evict oldest instead of dropping newest.** Once `MAX_PEERS`
+  is reached, a newly-discovered device now replaces the least-recently-seen
+  entry instead of being silently ignored forever.
+- **Web UI: fixed a Console reconnect-loop bug.** `connectConsole()` closed
+  the previous socket without clearing its `onclose` handler first: since a
+  deliberate `.close()` still fires `onclose`, every reconnect (including
+  automatic ones) could spawn an extra stacking reconnect timer.
+
 ## What's new (v1.4.1 — fix a responsiveness regression from v1.4.0)
 - **Fixed: relay toggles, the dashboard, and WiFi all got sluggish after the
   live console shipped.** `dbg()` (called on every relay toggle, WiFi retry,

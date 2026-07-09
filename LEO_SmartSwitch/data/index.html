@@ -376,7 +376,7 @@ function sysTab(s){sys=s;$$('#sysTabs button').forEach(b=>b.classList.toggle('se
 let consoleWs=null,consoleLines=[],consoleWant=false;
 function connectConsole(){
   consoleWant=true;
-  if(consoleWs)consoleWs.close();
+  if(consoleWs){consoleWs.onclose=null;consoleWs.close()}
   $('#consoleBox').textContent='Connecting…';
   consoleWs=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/console');
   consoleWs.onopen=()=>{consoleLines=[];$('#consoleBox').textContent=''};

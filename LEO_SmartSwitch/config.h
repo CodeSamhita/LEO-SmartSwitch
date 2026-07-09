@@ -6,7 +6,7 @@
    ===================================================================== */
 #pragma once
 
-#define FW_VERSION         "1.4.1-cluster"
+#define FW_VERSION         "1.4.2-cluster"
 #define DEVICE_MODEL       "LEO-C3"
 
 /* ---- Identity -------------------------------------------------------- */
@@ -54,6 +54,8 @@ static const int  RELAY_GPIO_POOL[RELAY_COUNT] = { 0, 1, 3, 10 };
 #define CLOCK_PERSIST_MS   120000   // persist last-known epoch
 #define STA_RETRY_MS       8000     // re-issue WiFi.begin while disconnected
 #define WDT_TIMEOUT_S      10       // task watchdog -> auto reboot if loop hangs
+#define LOG_PRUNE_MS       21600000 // re-run log pruning every 6h (boot-time prune can't
+                                     // age-cutoff since the clock isn't synced yet then)
 
 /* ---- Time ------------------------------------------------------------ */
 #define DEFAULT_TZ         "IST-5:30"     // POSIX TZ, India, no DST
