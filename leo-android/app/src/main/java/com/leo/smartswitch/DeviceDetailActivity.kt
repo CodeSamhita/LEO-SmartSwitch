@@ -93,6 +93,9 @@ class DeviceDetailActivity : GlassActivity() {
             val d = device() ?: return@launch
             LiveManager.connect(d)
             DeviceApi.state(d)?.let { updateUi(it) }
+            // mDNS isn't in /api/state, so fetch it once here rather than on
+            // every telemetry tick (updateUi runs ~1/s from the WebSocket).
+            DeviceApi.identity(d)?.let { statVals["mDNS"]?.text = it.optString("mdns", "—") }
         }
         lifecycleScope.launch {
             LiveManager.updates.filter { it.id == deviceId }.collect { updateUi(it) }
@@ -134,8 +137,6 @@ class DeviceDetailActivity : GlassActivity() {
         statVals["IP"]?.text = s.ip.ifEmpty { "—" }
         relayBox.removeAllViews()
         s.relays.forEachIndexed { i, r -> relayBox.addView(relayRow(i, r)) }
-        // mDNS comes from identity (state has no mdns field in older builds)
-        lifecycleScope.launch { device()?.let { d -> DeviceApi.identity(d)?.let { statVals["mDNS"]?.text = it.optString("mdns", "—") } } }
     }
 
     private fun relayRow(index: Int, relay: Relay): View {
