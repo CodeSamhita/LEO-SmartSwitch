@@ -9,6 +9,10 @@ toggles. No cloud, no account.
 > (see below) — a compiled `.apk` can't be produced outside an Android SDK.
 
 ## What changed in this pass
+- **Live console.** A new screen (from a device's detail page → *Live console*)
+  streams the firmware's debug output in real time over the `/console`
+  WebSocket — the same lines it prints over USB serial, viewable without a
+  cable. Auto-reconnects if the socket drops.
 - **Responsive layouts.** The dashboard now flows into a width-adaptive grid:
   **1 column on phones, 2 on large/landscape, 3 on tablets** (`GridLayout`,
   span chosen from `screenWidthDp`). Screen margins scale up via
@@ -53,6 +57,7 @@ toggles. No cloud, no account.
 app/src/main/java/com/leo/smartswitch/
   MainActivity.kt           dashboard (adaptive device grid, optimistic toggles)
   DeviceDetailActivity.kt   per-device detail (live)
+  ConsoleActivity.kt        live serial/debug console (/console WebSocket)
   SettingsActivity.kt       discovery + manual add + saved devices
   DeviceApi.kt              REST client + shared JSON parser + models
   LiveManager.kt            WebSocket telemetry with auto-reconnect

@@ -6,7 +6,7 @@
    ===================================================================== */
 #pragma once
 
-#define FW_VERSION         "1.3.1-cluster"
+#define FW_VERSION         "1.4.0-cluster"
 #define DEVICE_MODEL       "LEO-C3"
 
 /* ---- Identity -------------------------------------------------------- */
@@ -60,6 +60,9 @@ static const int  RELAY_GPIO_POOL[RELAY_COUNT] = { 0, 1, 3, 10 };
 #define DEFAULT_24H        0              // 0 = 12h AM/PM (default), 1 = 24h
 #define NTP_SERVER_1       "pool.ntp.org"
 #define NTP_SERVER_2       "time.google.com"
+
+/* ---- Live console (serial mirror over WebSocket) ---------------------- */
+#define CONSOLE_LINES      200      // RAM ring buffer; replayed to a client on /console connect
 
 /* ---- Storage / logs -------------------------------------------------- */
 #define FS_FILL_LIMIT      0.80     // prune logs above 80% LittleFS usage

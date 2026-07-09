@@ -78,7 +78,16 @@ bool   apActive       = false;
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+AsyncWebSocket consoleWs("/console");   // live serial-mirror stream (raw text, one line per frame)
 Adafruit_NeoPixel pix(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+/* live console: RAM ring buffer of recent lines, replayed to a client that
+   connects mid-stream, plus a copy always goes out to Serial and to any
+   /console WebSocket clients. Not flash-persisted (would wear the flash for
+   high-frequency debug lines) - the CRIT/ERR log below still is. */
+String   consoleBuf[CONSOLE_LINES];
+int      consoleHead  = 0;
+int      consoleCount = 0;
 
 /* smart-home network discovery (mDNS + SSDP/UPnP, no cloud) */
 AsyncUDP ssdp;
@@ -122,6 +131,7 @@ uint32_t loginLockUntil = 0;      // millis() until login is locked out
 
 /* ============================ FORWARD ============================== */
 void logEvent(const char* lvl, const String& msg);
+void dbg(const String& msg);
 void pushTelemetry();
 String telemetryJson();
 
@@ -189,6 +199,7 @@ void relaySet(int i, bool on) {
   cfg.relay[i].on = on;
   cfg.relay[i].onSinceMs = on ? millis() : 0;
   relayApplyPin(cfg.relay[i].gpio, on);
+  dbg("Relay " + String(i) + " (" + cfg.relay[i].name + ") -> " + (on ? "ON" : "OFF"));
   pushTelemetry();
 }
 
@@ -358,9 +369,23 @@ bool checkAuth(AsyncWebServerRequest* req) {
   return req->hasHeader("X-Auth-Token") && tokenValid(req->header("X-Auth-Token"));
 }
 
+/* ============================ CONSOLE =============================== */
+/* Serial mirror: prints to USB serial as before, and fans the same line out
+   to the RAM ring buffer + any live /console WebSocket clients so WiFi/mDNS
+   issues (like the AP-stuck bug) can be diagnosed without a USB cable. */
+void dbg(const String& msg) {
+  String line = "[" + String(millis() / 1000) + "s] " + msg;
+  Serial.println(line);
+  consoleBuf[consoleHead] = line;
+  consoleHead = (consoleHead + 1) % CONSOLE_LINES;
+  if (consoleCount < CONSOLE_LINES) consoleCount++;
+  if (consoleWs.count()) consoleWs.textAll(line);
+}
+
 /* ============================ LOGS ================================= */
 void logEvent(const char* lvl, const String& msg) {
-  // only critical / error are persisted
+  dbg(String("[") + lvl + "] " + msg);
+  // only critical / error are persisted to flash
   if (strcmp(lvl, "CRIT") != 0 && strcmp(lvl, "ERR") != 0) return;
   JsonDocument d; d["t"] = (long)time(nullptr); d["s"] = timeSynced; d["lvl"] = lvl; d["msg"] = msg;
   File f = LittleFS.open(LOG_FILE, "a"); if (!f) return; serializeJson(d, f); f.print("\n"); f.close();
@@ -496,6 +521,7 @@ void discoveryMdns() {
   bool ok = MDNS.begin(host.c_str());
   if (!ok) { delay(50); ok = MDNS.begin(host.c_str()); }   // one retry
   if (!ok) { logEvent("ERR", "mDNS begin failed for " + host); return; }
+  dbg("mDNS advertising as " + host + ".local");
   curMdnsHost = host;
   gName = cfg.deviceName.length() ? cfg.deviceName : String(DEFAULT_DEV_NAME);
   MDNS.setInstanceName(gName);
@@ -544,11 +570,13 @@ void peerUpsert(JsonDocument& d, const String& fromIp) {
   p.id = id; p.name = d["name"] | id; p.ip = d["ip"] | fromIp;
   p.role = d["role"] | ""; p.group = d["group"] | ""; p.type = DEVICE_TYPE;
   p.fw = d["fw"] | ""; p.port = d["port"] | 80; p.cap = d["cap"] | true; p.lastSeen = millis();
+  dbg("Peer discovered: " + p.id + " (" + p.name + ") at " + p.ip);
 }
 void peerPrune() {
   uint32_t now = millis();
   for (int i = peerCount - 1; i >= 0; --i) {
     if (now - peers[i].lastSeen > PEER_TIMEOUT_MS) {
+      dbg("Peer timed out: " + peers[i].id);
       for (int j = i; j < peerCount - 1; ++j) peers[j] = peers[j + 1];
       peerCount--;
     }
@@ -667,6 +695,7 @@ void wifiEvent(WiFiEvent_t e) {
       logEvent("ERR", "WiFi connected " + WiFi.localIP().toString());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      dbg("WiFi STA disconnected");
       ssdpStop();
       if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
       apStart();                      // bring AP back fast
@@ -735,10 +764,12 @@ void wifiTick() {
     WiFi.disconnect();
     WiFi.setTxPower(WIFI_TX_POWER);
     WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.c_str());
+    dbg("WiFi retry: joining " + cfg.staSsid);
     // If we've been down a long time, a full radio reset clears deeper wedges.
     if (staDownSince == 0) staDownSince = millis();
     if (millis() - staDownSince > 120000) {    // 2 min of failure -> hard reset radio
       staDownSince = millis();
+      dbg("WiFi hard reset: 2 min without a connection");
       WiFi.disconnect(true); delay(20); WiFi.mode(WIFI_AP_STA); apStart();
       WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.c_str());
     }
@@ -937,6 +968,14 @@ void webBegin() {
   });
   server.addHandler(&ws);
 
+  // live console / serial mirror: replay the ring buffer, then stream new lines
+  consoleWs.onEvent([](AsyncWebSocket*, AsyncWebSocketClient* c, AwsEventType t, void*, uint8_t*, size_t) {
+    if (t != WS_EVT_CONNECT) return;
+    int start = (consoleCount < CONSOLE_LINES) ? 0 : consoleHead;
+    for (int i = 0; i < consoleCount; ++i) c->text(consoleBuf[(start + i) % CONSOLE_LINES]);
+  });
+  server.addHandler(&consoleWs);
+
   // static UI from LittleFS
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
@@ -1116,6 +1155,7 @@ void loop() {
   uint32_t t0 = millis();
   esp_task_wdt_reset();
   ws.cleanupClients();
+  consoleWs.cleanupClients();
   ledTick();
   wifiTick();
   beaconPoll();                        // receive peer announcements (non-blocking)

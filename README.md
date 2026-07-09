@@ -1,5 +1,17 @@
 # LEO Smart Switch — ESP32-C3 (Phase 1)
 
+## What's new (v1.4.0 — live serial console)
+- **Live console, wired everywhere.** The firmware now mirrors every meaningful
+  debug line (WiFi connect/retry/disconnect, mDNS ownership, relay toggles,
+  peer discovery, boot/error events) to USB serial **and** to a new `/console`
+  WebSocket — a 200-line RAM ring buffer means a client that connects mid-stream
+  still gets recent history, not just what happens after it joins.
+  - **Web UI:** System → **Console** tab, a live-scrolling terminal.
+  - **Android app:** device detail → **Live console** screen.
+  - High-frequency debug lines are RAM-only by design (persisting them to flash
+    on every relay flip or peer beacon would wear it out); the existing
+    disk-persisted CRIT/ERR log in System → Logs is unchanged.
+
 ## What's new (v1.3.1 — WiFi reconnect fix + security hardening)
 - **Fixed: device stuck on AP mode forever after a failed boot-time WiFi join.** The retry loop called `WiFi.begin()` repeatedly without an intervening `WiFi.disconnect()`; the IDF driver silently ignores a bare repeat `begin()` after a failed/absent-AP attempt, so the unit never actually retried even once the router was broadcasting again. Every retry now disconnects first.
 - **Stronger password storage:** login password is now salted **SHA-256** (mbedtls, salt = the device's own stable ID) instead of an unsalted 32-bit FNV1a hash. Passwords set on older firmware will need to be re-entered once (a log entry / Security tab flags this).
@@ -322,7 +334,8 @@ send the `X-Auth-Token` header obtained from `/api/login`.
 | POST | `/api/relaymap/set` | `{relays:[{name,gpio,watts}]}` | ✓ | Remap (unique GPIO enforced) |
 | GET/POST | `/api/authcfg` · `/api/auth` | `{enabled,user,pass}` | ✓ | Security settings |
 | POST | `/api/login` | `{user,pass}` → `{token}` | open | Obtain a remembered token |
-| GET/POST | `/api/logs` · `/api/logs/clear` | — | ✓ | View / clear logs |
+| GET/POST | `/api/logs` · `/api/logs/clear` | — | ✓ | View / clear persisted CRIT/ERR logs |
+| WS | `ws://…/console` | — | open | Live serial mirror: every debug line, replayed from a 200-line RAM buffer on connect, then streamed live |
 | POST | `/api/reboot` | — | ✓ | Soft reboot |
 | POST | `/api/reset` | `{confirm:"RESET"}` | ✓ | Factory reset |
 | GET | `/description.xml` | — | open | UPnP device description (SSDP) |

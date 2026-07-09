@@ -80,6 +80,8 @@ class DeviceDetailActivity : GlassActivity() {
         nav.addView(divider())
         nav.addView(navRow("Device settings & LED") { open(DeviceSettingsActivity::class.java) })
         nav.addView(divider())
+        nav.addView(navRow("Live console") { open(ConsoleActivity::class.java) })
+        nav.addView(divider())
         nav.addView(navRow("Open web console") {
             device()?.let { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it.baseUrl()))) }
         })
