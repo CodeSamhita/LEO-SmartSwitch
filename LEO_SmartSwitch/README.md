@@ -1,5 +1,21 @@
 # LEO Smart Switch — ESP32-C3 (Phase 1)
 
+## What's new (v1.4.1 — fix a responsiveness regression from v1.4.0)
+- **Fixed: relay toggles, the dashboard, and WiFi all got sluggish after the
+  live console shipped.** `dbg()` (called on every relay toggle, WiFi retry,
+  and peer-discovery event) wrote to `Serial` unconditionally. On this board's
+  USB-CDC serial, `Serial.println()` **blocks** once the TX buffer fills if no
+  USB host is actually attached and reading — the normal case once you unplug
+  the programming cable. Every one of those events now stalled until the
+  device rebooted or a cable was reattached. `dbg()` now guards with
+  `if (Serial)` (the documented fix for exactly this HWCDC behavior on
+  ESP32-C3) so it never blocks when running untethered.
+- **Removed a second, slower-burning cause.** The console's 200-line ring
+  buffer stored Arduino `String` objects reassigned forever as it wrapped —
+  a known source of heap fragmentation on ESP32 over long uptime, which would
+  make things gradually worse the longer the device ran. It's now fixed-size
+  `char` buffers with no repeated heap churn.
+
 ## What's new (v1.4.0 — live serial console)
 - **Live console, wired everywhere.** The firmware now mirrors every meaningful
   debug line (WiFi connect/retry/disconnect, mDNS ownership, relay toggles,

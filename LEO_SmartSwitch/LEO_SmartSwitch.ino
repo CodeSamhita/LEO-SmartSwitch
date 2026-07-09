@@ -84,8 +84,10 @@ Adafruit_NeoPixel pix(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 /* live console: RAM ring buffer of recent lines, replayed to a client that
    connects mid-stream, plus a copy always goes out to Serial and to any
    /console WebSocket clients. Not flash-persisted (would wear the flash for
-   high-frequency debug lines) - the CRIT/ERR log below still is. */
-String   consoleBuf[CONSOLE_LINES];
+   high-frequency debug lines) - the CRIT/ERR log below still is.
+   Fixed-size char lines (not String) - a 200-slot ring buffer reassigned
+   forever via Arduino String would fragment the heap over long uptime. */
+char     consoleBuf[CONSOLE_LINES][CONSOLE_LINE_LEN];
 int      consoleHead  = 0;
 int      consoleCount = 0;
 
@@ -372,14 +374,20 @@ bool checkAuth(AsyncWebServerRequest* req) {
 /* ============================ CONSOLE =============================== */
 /* Serial mirror: prints to USB serial as before, and fans the same line out
    to the RAM ring buffer + any live /console WebSocket clients so WiFi/mDNS
-   issues (like the AP-stuck bug) can be diagnosed without a USB cable. */
+   issues (like the AP-stuck bug) can be diagnosed without a USB cable.
+   `if (Serial)` matters here: on boards with USB-CDC serial (this project's
+   README enables it for Arduino IDE builds), Serial.print() BLOCKS once the
+   TX buffer fills if no USB host is actually attached and reading - which is
+   the normal case once you unplug the programming cable. dbg() now runs on
+   every relay toggle and WiFi retry, so without this guard the device stalls
+   on every one of those the moment it's running untethered. */
 void dbg(const String& msg) {
-  String line = "[" + String(millis() / 1000) + "s] " + msg;
-  Serial.println(line);
-  consoleBuf[consoleHead] = line;
+  char* slot = consoleBuf[consoleHead];
+  snprintf(slot, CONSOLE_LINE_LEN, "[%lus] %s", (unsigned long)(millis() / 1000), msg.c_str());
+  if (Serial) Serial.println(slot);
   consoleHead = (consoleHead + 1) % CONSOLE_LINES;
   if (consoleCount < CONSOLE_LINES) consoleCount++;
-  if (consoleWs.count()) consoleWs.textAll(line);
+  if (consoleWs.count()) consoleWs.textAll(slot);
 }
 
 /* ============================ LOGS ================================= */

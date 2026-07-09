@@ -6,7 +6,7 @@
    ===================================================================== */
 #pragma once
 
-#define FW_VERSION         "1.4.0-cluster"
+#define FW_VERSION         "1.4.1-cluster"
 #define DEVICE_MODEL       "LEO-C3"
 
 /* ---- Identity -------------------------------------------------------- */
@@ -63,6 +63,7 @@ static const int  RELAY_GPIO_POOL[RELAY_COUNT] = { 0, 1, 3, 10 };
 
 /* ---- Live console (serial mirror over WebSocket) ---------------------- */
 #define CONSOLE_LINES      200      // RAM ring buffer; replayed to a client on /console connect
+#define CONSOLE_LINE_LEN   110      // fixed-size lines (no String churn/fragmentation over uptime)
 
 /* ---- Storage / logs -------------------------------------------------- */
 #define FS_FILL_LIMIT      0.80     // prune logs above 80% LittleFS usage
