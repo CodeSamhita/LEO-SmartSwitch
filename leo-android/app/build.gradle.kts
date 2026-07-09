@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -36,9 +37,6 @@ android {
     // Glance widgets are written with @Composable, so the Compose compiler is required.
     buildFeatures {
         compose = true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"   // matches Kotlin 1.9.24
     }
 }
 
