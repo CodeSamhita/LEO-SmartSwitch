@@ -1,0 +1,19 @@
+<resources>
+    <!-- base "moondust" palette -->
+    <color name="moondust_bg">#070A0D</color>
+    <color name="moondust_accent">#22E8E0</color>
+    <color name="moondust_accent2">#6E7BFF</color>
+    <color name="moondust_accent3">#E86AD0</color>
+    <color name="moondust_text_primary">#EAF2F7</color>
+    <color name="moondust_text_secondary">#8B9AA8</color>
+    <color name="moondust_danger">#FF5A6E</color>
+    <color name="moondust_good">#34E3A4</color>
+    <color name="ic_launcher_bg">#070A0D</color>
+
+    <!-- glass tokens -->
+    <color name="glass_fill">#14FFFFFF</color>
+    <color name="glass_stroke">#2BFFFFFF</color>
+    <color name="glass_on_fill">#2622E8E0</color>
+    <color name="glass_on_stroke">#5522E8E0</color>
+    <color name="on_accent_text">#04201E</color>
+</resources>

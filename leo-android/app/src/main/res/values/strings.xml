@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">LEO Smart Switch</string>
+    <string name="widget_desc">Toggle relays from your home screen.</string>
+</resources>
