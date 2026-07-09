@@ -43,12 +43,18 @@ open class GlassActivity : AppCompatActivity() {
         Anim.floatOrb(o2, dp(-50).toFloat(), dp(-70).toFloat(), 9000)
         Anim.floatOrb(o3, dp(70).toFloat(), dp(-30).toFloat(), 8000)
 
+        // Side margin scales with the device via values-w600dp / values-w840dp
+        // (18dp phones, 32dp large/foldables, 64dp tablets) so cards don't
+        // stretch edge-to-edge on wide screens. These resources previously
+        // existed but were never referenced anywhere.
+        val margin = resources.getDimensionPixelSize(R.dimen.screen_margin)
+
         val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), dp(10), dp(18), dp(10))
+            setPadding(margin, dp(10), margin, dp(10))
         }
         if (showBack) bar.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_back)
@@ -64,7 +70,7 @@ open class GlassActivity : AppCompatActivity() {
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(6), dp(18), dp(28))
+            setPadding(margin, dp(6), margin, dp(28))
         }
         val scroll = ScrollView(this).apply {
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -80,8 +86,8 @@ open class GlassActivity : AppCompatActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(rootFrame) { _, insets ->
             val sb = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             topInset = sb.top
-            bar.setPadding(dp(18), dp(10) + sb.top, dp(18), dp(10))
-            content.setPadding(dp(18), dp(6), dp(18), dp(28) + sb.bottom)
+            bar.setPadding(margin, dp(10) + sb.top, margin, dp(10))
+            content.setPadding(margin, dp(6), margin, dp(28) + sb.bottom)
             insets
         }
         return content

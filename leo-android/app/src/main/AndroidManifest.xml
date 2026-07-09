@@ -35,6 +35,7 @@
         <activity android:name=".EnergyActivity" android:exported="false" />
         <activity android:name=".NetworkActivity" android:exported="false" />
         <activity android:name=".DeviceSettingsActivity" android:exported="false" />
+        <activity android:name=".ConsoleActivity" android:exported="false" />
 
         <receiver
             android:name=".widget.LeoWidgetReceiver"

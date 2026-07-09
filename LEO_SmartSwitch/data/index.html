@@ -248,6 +248,7 @@ nav button.sel{color:var(--accent)}nav button.sel svg{stroke:var(--accent)}
       <button data-s="led" onclick="sysTab('led')">LED</button>
       <button data-s="security" onclick="sysTab('security')">Security</button>
       <button data-s="logs" onclick="sysTab('logs')">Logs</button>
+      <button data-s="console" onclick="sysTab('console')">Console</button>
       <button data-s="device" onclick="sysTab('device')">Device</button>
     </div>
 
@@ -303,6 +304,12 @@ nav button.sel{color:var(--accent)}nav button.sel svg{stroke:var(--accent)}
       <div class="row2" style="margin-top:8px"><button class="btn ghost" onclick="loadLogs()">Refresh</button><button class="btn ghost" onclick="clearLogs()">Clear</button></div>
     </div>
 
+    <div class="syspane" id="s-console" style="display:none">
+      <p class="note">Live mirror of the device's debug output (the same lines it prints over USB serial). Connects only while this tab is open.</p>
+      <div class="logbox" id="consoleBox" style="max-height:320px">—</div>
+      <div class="row2" style="margin-top:8px"><button class="btn ghost" onclick="clearConsole()">Clear</button><button class="btn ghost" onclick="connectConsole()">Reconnect</button></div>
+    </div>
+
     <div class="syspane" id="s-device" style="display:none">
       <div id="sysinfo"></div>
       <button class="btn ghost" style="margin-top:14px" onclick="reboot()">Soft reboot</button>
@@ -352,6 +359,7 @@ function switchPage(p){
   $$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));
   $$('#tabbar button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));
   clearInterval(peerTimer);
+  disconnectConsole();
   if(p==='energy')loadEnergy();
   if(p==='network')loadNetwork();
   if(p==='system')loadSystem();
@@ -360,7 +368,27 @@ function switchPage(p){
 }
 function sysTab(s){sys=s;$$('#sysTabs button').forEach(b=>b.classList.toggle('sel',b.dataset.s===s));
   $$('.syspane').forEach(p=>p.style.display=p.id==='s-'+s?'block':'none');
-  if(s==='relays')loadMap();if(s==='led')loadLed();if(s==='security')loadAuthCfg();if(s==='logs')loadLogs();if(s==='device')loadDeviceInfo();if(s==='time')loadTime()}
+  if(s==='relays')loadMap();if(s==='led')loadLed();if(s==='security')loadAuthCfg();if(s==='logs')loadLogs();if(s==='device')loadDeviceInfo();if(s==='time')loadTime();
+  if(s==='console')connectConsole();else disconnectConsole();
+}
+
+/* ---- live console (serial mirror) ---- */
+let consoleWs=null,consoleLines=[],consoleWant=false;
+function connectConsole(){
+  consoleWant=true;
+  if(consoleWs)consoleWs.close();
+  $('#consoleBox').textContent='Connecting…';
+  consoleWs=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/console');
+  consoleWs.onopen=()=>{consoleLines=[];$('#consoleBox').textContent=''};
+  consoleWs.onmessage=e=>{
+    consoleLines.push(e.data);if(consoleLines.length>500)consoleLines.shift();
+    const box=$('#consoleBox');const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-24;
+    box.textContent=consoleLines.join('\n');if(atBottom)box.scrollTop=box.scrollHeight;
+  };
+  consoleWs.onclose=()=>{if(consoleWant)setTimeout(()=>{if(consoleWant)connectConsole()},2000)};
+}
+function disconnectConsole(){consoleWant=false;if(consoleWs){consoleWs.onclose=null;consoleWs.close();consoleWs=null}}
+function clearConsole(){consoleLines=[];$('#consoleBox').textContent=''}
 
 /* ---- live telemetry (this device) ---- */
 function connectWS(){const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
@@ -471,7 +499,8 @@ async function loadNetwork(){
       : 'Manual override';
   $('#idSummary').innerHTML=[['Device ID',id.id],['AP name',id.ap],['mDNS',id.mdns],['IP',id.ip||(last&&last.ip)||'—']]
     .map(([k,v])=>`<div class="kv"><span>${k}</span><b>${esc(v||'—')}</b></div>`).join('')
-    +`<p class="note" style="margin:8px 0 0">${own}. Device ID and AP share tag <b>${esc(code)}</b>. Type <b>auto</b> to rejoin the leoswitch.local election.</p>`;
+    +`<p class="note" style="margin:8px 0 0">${own}. Device ID and AP share tag <b>${esc(code)}</b>. Type <b>auto</b> to rejoin the leoswitch.local election.</p>`
+    +(id.apPassDefault?`<p class="note" style="margin:8px 0 0;color:var(--warn)">⚠ This device still uses the default AP password — set a new one below.</p>`:'');
   if(last)$('#netcur').textContent=last.conn==='WIFI'?`Connected to ${last.ssid} (${last.rssi} dBm)`:`Not on WiFi — hosting AP ${id.ap}`;
   clearDirty();
 }

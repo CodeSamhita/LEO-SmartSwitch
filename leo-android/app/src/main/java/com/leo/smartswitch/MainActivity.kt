@@ -175,7 +175,7 @@ class MainActivity : GlassActivity() {
         card.addView(header)
 
         card.addView(GridLayout(this).apply {
-            tag = "relays"; columnCount = 2
+            tag = "relays"; columnCount = relayColumns()
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(14) }
@@ -189,6 +189,9 @@ class MainActivity : GlassActivity() {
             if (s != null) updateCard(s) else setDot(card, false)
         }
     }
+
+    /** 2 relay columns on phones, 3 once there's room (large/landscape/tablet). */
+    private fun relayColumns(): Int = if (resources.configuration.screenWidthDp >= 600) 3 else 2
 
     private fun setDot(card: View, online: Boolean) {
         val dot = card.findViewWithTag<View>("dot")

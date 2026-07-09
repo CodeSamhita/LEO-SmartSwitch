@@ -26,6 +26,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <esp_task_wdt.h>
 #include <esp_sntp.h>
+#include <mbedtls/sha256.h>
 #include <time.h>
 #include "config.h"
 
@@ -77,7 +78,16 @@ bool   apActive       = false;
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+AsyncWebSocket consoleWs("/console");   // live serial-mirror stream (raw text, one line per frame)
 Adafruit_NeoPixel pix(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+/* live console: RAM ring buffer of recent lines, replayed to a client that
+   connects mid-stream, plus a copy always goes out to Serial and to any
+   /console WebSocket clients. Not flash-persisted (would wear the flash for
+   high-frequency debug lines) - the CRIT/ERR log below still is. */
+String   consoleBuf[CONSOLE_LINES];
+int      consoleHead  = 0;
+int      consoleCount = 0;
 
 /* smart-home network discovery (mDNS + SSDP/UPnP, no cloud) */
 AsyncUDP ssdp;
@@ -116,9 +126,12 @@ int energyCount = 0;
 
 String authTokens[MAX_REMEMBERED_DEVICES];
 int    authTokenCount = 0;
+int      loginFails     = 0;      // consecutive failed /api/login attempts
+uint32_t loginLockUntil = 0;      // millis() until login is locked out
 
 /* ============================ FORWARD ============================== */
 void logEvent(const char* lvl, const String& msg);
+void dbg(const String& msg);
 void pushTelemetry();
 String telemetryJson();
 
@@ -128,8 +141,21 @@ static uint32_t fnv1a(const String& s) {
   for (size_t i = 0; i < s.length(); ++i) { h ^= (uint8_t)s[i]; h *= 16777619u; }
   return h;
 }
+/* Salted SHA-256 (salt = this device's stable MAC-derived id, gId).
+   Replaces the old 32-bit FNV1a hash, which was brute-forceable offline. */
 static String hashPass(const String& p) {
-  char b[12]; snprintf(b, sizeof(b), "%08x", fnv1a("leo:" + p)); return String(b);
+  String salted = "leo:" + gId + ":" + p;
+  unsigned char out[32];
+  mbedtls_sha256((const unsigned char*)salted.c_str(), salted.length(), out, 0);
+  String s; s.reserve(64);
+  for (int i = 0; i < 32; ++i) { char b[3]; snprintf(b, sizeof(b), "%02x", out[i]); s += b; }
+  return s;
+}
+static bool constEq(const String& a, const String& b) {
+  if (a.length() != b.length()) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < a.length(); ++i) diff |= (uint8_t)a[i] ^ (uint8_t)b[i];
+  return diff == 0;
 }
 static String randToken() {
   String t; for (int i = 0; i < 4; ++i) { char b[9]; snprintf(b, sizeof(b), "%08x", esp_random()); t += b; } return t;
@@ -173,6 +199,7 @@ void relaySet(int i, bool on) {
   cfg.relay[i].on = on;
   cfg.relay[i].onSinceMs = on ? millis() : 0;
   relayApplyPin(cfg.relay[i].gpio, on);
+  dbg("Relay " + String(i) + " (" + cfg.relay[i].name + ") -> " + (on ? "ON" : "OFF"));
   pushTelemetry();
 }
 
@@ -303,18 +330,62 @@ String authIssue() {
   authTokens[authTokenCount++] = t; authSave(); return t;
 }
 bool tokenValid(const String& t) {
-  for (int i = 0; i < authTokenCount; ++i) if (authTokens[i] == t && t.length()) return true;
+  if (!t.length()) return false;
+  for (int i = 0; i < authTokenCount; ++i) if (constEq(authTokens[i], t)) return true;
   return false;
 }
-bool checkAuth(AsyncWebServerRequest* req) {
-  if (!cfg.authEnabled) return true;
-  if (req->hasHeader("X-Auth-Token") && tokenValid(req->header("X-Auth-Token"))) return true;
+
+/* ---- CSRF / DNS-rebinding guard ----
+   The API uses wildcard CORS so any LEO device's dashboard can control its
+   peers cross-origin. That also means, with login disabled (the default),
+   any webpage the user's browser visits could otherwise POST to a guessed
+   LAN IP and flip relays. Since a browser always sends an Origin header on
+   a cross-origin fetch, reject anything whose Origin isn't a private LAN
+   address (RFC1918) or an *.local mDNS host - a public/internet page can
+   never satisfy that, while other LEO devices on the LAN always will. */
+static bool ipIsPrivate(const IPAddress& ip) {
+  if (ip[0] == 10) return true;
+  if (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) return true;
+  if (ip[0] == 192 && ip[1] == 168) return true;
+  if (ip[0] == 127) return true;
   return false;
+}
+static bool originIsLocal(AsyncWebServerRequest* req) {
+  if (!req->hasHeader("Origin")) return true;      // same-origin nav / non-browser client
+  String o = req->header("Origin"); o.toLowerCase();
+  if (o.indexOf(".local") >= 0) return true;        // mDNS-addressed LEO device
+  int p = o.indexOf("://"); if (p < 0) return false;
+  String host = o.substring(p + 3);
+  int slash = host.indexOf('/'); if (slash >= 0) host = host.substring(0, slash);
+  int colon = host.indexOf(':'); if (colon >= 0) host = host.substring(0, colon);
+  IPAddress ip;
+  if (!ip.fromString(host)) return false;           // not a bare IP and not *.local -> reject
+  return ipIsPrivate(ip);
+}
+
+bool checkAuth(AsyncWebServerRequest* req) {
+  if (!originIsLocal(req)) return false;
+  if (!cfg.authEnabled) return true;
+  return req->hasHeader("X-Auth-Token") && tokenValid(req->header("X-Auth-Token"));
+}
+
+/* ============================ CONSOLE =============================== */
+/* Serial mirror: prints to USB serial as before, and fans the same line out
+   to the RAM ring buffer + any live /console WebSocket clients so WiFi/mDNS
+   issues (like the AP-stuck bug) can be diagnosed without a USB cable. */
+void dbg(const String& msg) {
+  String line = "[" + String(millis() / 1000) + "s] " + msg;
+  Serial.println(line);
+  consoleBuf[consoleHead] = line;
+  consoleHead = (consoleHead + 1) % CONSOLE_LINES;
+  if (consoleCount < CONSOLE_LINES) consoleCount++;
+  if (consoleWs.count()) consoleWs.textAll(line);
 }
 
 /* ============================ LOGS ================================= */
 void logEvent(const char* lvl, const String& msg) {
-  // only critical / error are persisted
+  dbg(String("[") + lvl + "] " + msg);
+  // only critical / error are persisted to flash
   if (strcmp(lvl, "CRIT") != 0 && strcmp(lvl, "ERR") != 0) return;
   JsonDocument d; d["t"] = (long)time(nullptr); d["s"] = timeSynced; d["lvl"] = lvl; d["msg"] = msg;
   File f = LittleFS.open(LOG_FILE, "a"); if (!f) return; serializeJson(d, f); f.print("\n"); f.close();
@@ -450,6 +521,7 @@ void discoveryMdns() {
   bool ok = MDNS.begin(host.c_str());
   if (!ok) { delay(50); ok = MDNS.begin(host.c_str()); }   // one retry
   if (!ok) { logEvent("ERR", "mDNS begin failed for " + host); return; }
+  dbg("mDNS advertising as " + host + ".local");
   curMdnsHost = host;
   gName = cfg.deviceName.length() ? cfg.deviceName : String(DEFAULT_DEV_NAME);
   MDNS.setInstanceName(gName);
@@ -498,11 +570,13 @@ void peerUpsert(JsonDocument& d, const String& fromIp) {
   p.id = id; p.name = d["name"] | id; p.ip = d["ip"] | fromIp;
   p.role = d["role"] | ""; p.group = d["group"] | ""; p.type = DEVICE_TYPE;
   p.fw = d["fw"] | ""; p.port = d["port"] | 80; p.cap = d["cap"] | true; p.lastSeen = millis();
+  dbg("Peer discovered: " + p.id + " (" + p.name + ") at " + p.ip);
 }
 void peerPrune() {
   uint32_t now = millis();
   for (int i = peerCount - 1; i >= 0; --i) {
     if (now - peers[i].lastSeen > PEER_TIMEOUT_MS) {
+      dbg("Peer timed out: " + peers[i].id);
       for (int j = i; j < peerCount - 1; ++j) peers[j] = peers[j + 1];
       peerCount--;
     }
@@ -621,6 +695,7 @@ void wifiEvent(WiFiEvent_t e) {
       logEvent("ERR", "WiFi connected " + WiFi.localIP().toString());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      dbg("WiFi STA disconnected");
       ssdpStop();
       if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
       apStart();                      // bring AP back fast
@@ -681,12 +756,20 @@ void wifiTick() {
     lastStaTry = millis();
     if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
     apStart();                                 // AP stays up while we retry
+    // A bare repeat WiFi.begin() after a failed/absent-AP attempt is silently
+    // ignored by the IDF driver (it needs its connect state machine reset).
+    // Without this disconnect, a device that boots before its router is up
+    // (or briefly loses the AP) never actually retries and is stuck on AP
+    // forever even once the SSID is broadcasting again.
+    WiFi.disconnect();
     WiFi.setTxPower(WIFI_TX_POWER);
     WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.c_str());
+    dbg("WiFi retry: joining " + cfg.staSsid);
     // If we've been down a long time, a full radio reset clears deeper wedges.
     if (staDownSince == 0) staDownSince = millis();
     if (millis() - staDownSince > 120000) {    // 2 min of failure -> hard reset radio
       staDownSince = millis();
+      dbg("WiFi hard reset: 2 min without a connection");
       WiFi.disconnect(true); delay(20); WiFi.mode(WIFI_AP_STA); apStart();
       WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.c_str());
     }
@@ -853,11 +936,17 @@ void onJsonLed(AsyncWebServerRequest* req, JsonVariant& json) {
   req->send(200, "application/json", "{\"ok\":1}");
 }
 void onJsonLogin(AsyncWebServerRequest* req, JsonVariant& json) {
+  if (!originIsLocal(req)) return sendUnauth(req);
+  if (millis() < loginLockUntil) { req->send(429, "application/json", "{\"err\":\"locked\"}"); return; }
   String u = json["user"] | ""; String p = json["pass"] | "";
-  if (cfg.authEnabled && u == cfg.authUser && hashPass(p) == cfg.authPass) {
+  if (cfg.authEnabled && u == cfg.authUser && constEq(hashPass(p), cfg.authPass)) {
+    loginFails = 0;
     String t = authIssue();
     req->send(200, "application/json", String("{\"token\":\"") + t + "\"}");
-  } else req->send(401, "application/json", "{\"err\":\"bad\"}");
+  } else {
+    if (++loginFails >= 5) { loginLockUntil = millis() + 30000; loginFails = 0; }  // slow brute force
+    req->send(401, "application/json", "{\"err\":\"bad\"}");
+  }
 }
 void onJsonReset(AsyncWebServerRequest* req, JsonVariant& json) {
   if (!checkAuth(req)) return sendUnauth(req);
@@ -879,6 +968,14 @@ void webBegin() {
   });
   server.addHandler(&ws);
 
+  // live console / serial mirror: replay the ring buffer, then stream new lines
+  consoleWs.onEvent([](AsyncWebSocket*, AsyncWebSocketClient* c, AwsEventType t, void*, uint8_t*, size_t) {
+    if (t != WS_EVT_CONNECT) return;
+    int start = (consoleCount < CONSOLE_LINES) ? 0 : consoleHead;
+    for (int i = 0; i < consoleCount; ++i) c->text(consoleBuf[(start + i) % CONSOLE_LINES]);
+  });
+  server.addHandler(&consoleWs);
+
   // static UI from LittleFS
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
@@ -889,6 +986,7 @@ void webBegin() {
     d["mdns"] = (curMdnsHost.length() ? curMdnsHost : String(DEFAULT_MDNS_HOST)) + ".local"; d["ip"] = WiFi.localIP().toString();
     d["mdnsAuto"] = (cfg.mdnsHost.length() == 0); d["ownsCanonical"] = canonicalOwner();
     d["ap"] = cfg.apSsid; d["apip"] = WiFi.softAPIP().toString();
+    d["apPassDefault"] = (cfg.apPass == String(DEFAULT_AP_PASS));
     d["type"] = DEVICE_TYPE; d["model"] = DEVICE_MODEL; d["fw"] = FW_VERSION;
     String out; serializeJson(d, out); r->send(200, "application/json", out);
   });
@@ -1035,6 +1133,11 @@ void setup() {
   relayInitPins();              // all OFF, glitch-safe
   logPrune();
 
+  if (cfg.apPass == String(DEFAULT_AP_PASS))
+    logEvent("ERR", "Default AP password in use - change it in Network settings");
+  if (cfg.authEnabled && cfg.authPass.length() && cfg.authPass.length() != 64)
+    logEvent("ERR", "Stored password uses an old hash format - re-set it in Security settings");
+
   clockBegin();                 // own clock now, NTP drift correction later
   wifiBegin();
   webBegin();
@@ -1052,6 +1155,7 @@ void loop() {
   uint32_t t0 = millis();
   esp_task_wdt_reset();
   ws.cleanupClients();
+  consoleWs.cleanupClients();
   ledTick();
   wifiTick();
   beaconPoll();                        // receive peer announcements (non-blocking)
