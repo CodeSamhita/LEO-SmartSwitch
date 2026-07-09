@@ -1,0 +1,12 @@
+<resources>
+    <style name="Theme.Leo" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/moondust_accent</item>
+        <item name="colorOnPrimary">@color/on_accent_text</item>
+        <item name="colorSecondary">@color/moondust_accent2</item>
+        <item name="android:windowBackground">@color/moondust_bg</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>
