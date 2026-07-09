@@ -1,5 +1,12 @@
 # LEO Smart Switch — ESP32-C3 (Phase 1)
 
+## What's new (v1.3.1 — WiFi reconnect fix + security hardening)
+- **Fixed: device stuck on AP mode forever after a failed boot-time WiFi join.** The retry loop called `WiFi.begin()` repeatedly without an intervening `WiFi.disconnect()`; the IDF driver silently ignores a bare repeat `begin()` after a failed/absent-AP attempt, so the unit never actually retried even once the router was broadcasting again. Every retry now disconnects first.
+- **Stronger password storage:** login password is now salted **SHA-256** (mbedtls, salt = the device's own stable ID) instead of an unsalted 32-bit FNV1a hash. Passwords set on older firmware will need to be re-entered once (a log entry / Security tab flags this).
+- **CSRF / DNS-rebinding guard:** all control endpoints now reject requests whose browser `Origin` isn't a private LAN address or `*.local` host, so an arbitrary public webpage can no longer flip relays on a device that has login disabled (the wildcard CORS needed for the peer dashboard is otherwise unrestricted).
+- **Login lockout:** 5 consecutive failed `/api/login` attempts trigger a 30 s lockout to slow brute forcing.
+- **Default AP password nudge:** a warning is logged at boot and shown on the Network tab if the AP password hasn't been changed from the firmware default.
+
 A **local-first, 4-channel smart relay controller** for the ESP32-C3. It hosts its
 own web UI, joins your home WiFi with automatic Access-Point failover, keeps time
 even when the internet is down, estimates per-relay energy use, recovers itself

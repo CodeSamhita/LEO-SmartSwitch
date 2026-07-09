@@ -471,7 +471,8 @@ async function loadNetwork(){
       : 'Manual override';
   $('#idSummary').innerHTML=[['Device ID',id.id],['AP name',id.ap],['mDNS',id.mdns],['IP',id.ip||(last&&last.ip)||'—']]
     .map(([k,v])=>`<div class="kv"><span>${k}</span><b>${esc(v||'—')}</b></div>`).join('')
-    +`<p class="note" style="margin:8px 0 0">${own}. Device ID and AP share tag <b>${esc(code)}</b>. Type <b>auto</b> to rejoin the leoswitch.local election.</p>`;
+    +`<p class="note" style="margin:8px 0 0">${own}. Device ID and AP share tag <b>${esc(code)}</b>. Type <b>auto</b> to rejoin the leoswitch.local election.</p>`
+    +(id.apPassDefault?`<p class="note" style="margin:8px 0 0;color:var(--warn)">⚠ This device still uses the default AP password — set a new one below.</p>`:'');
   if(last)$('#netcur').textContent=last.conn==='WIFI'?`Connected to ${last.ssid} (${last.rssi} dBm)`:`Not on WiFi — hosting AP ${id.ap}`;
   clearDirty();
 }

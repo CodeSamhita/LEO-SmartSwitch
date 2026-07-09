@@ -6,7 +6,7 @@
    ===================================================================== */
 #pragma once
 
-#define FW_VERSION         "1.3.0-cluster"
+#define FW_VERSION         "1.3.1-cluster"
 #define DEVICE_MODEL       "LEO-C3"
 
 /* ---- Identity -------------------------------------------------------- */
