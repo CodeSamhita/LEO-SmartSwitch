@@ -34,10 +34,36 @@ Libraries: ESPAsyncWebServer + AsyncTCP (ESP32Async), ArduinoJson 7, Adafruit Ne
   Update firmware** → e.g. `LEO_SwitchEdge.ino.bin`. The hub stores it, then streams it
   over ESP-NOW (≈1 MB in under a minute). A failed transfer leaves the old firmware running.
 
-## Protocol (ESP-NOW, v1)
-Packed structs, identical in every sketch (`LEO EDGE PROTOCOL v1` block): `HELLO` →
+## Security (hub 1.1.0 / switch edge 2.0.0)
+- **Signed radio link:** every hub↔edge packet (except the pairing HELLO) carries an
+  HMAC-SHA256 tag made with that device's own 128-bit key, bound to a per-session random
+  nonce and a strictly increasing counter — forged or replayed commands are ignored.
+  The hub also sends a signed keep-alive every 3 s; an edge that hears no signed packet
+  for 10 s re-links with a fresh session.
+- **Pairing needs permission:** keys are issued only while *Devices → Allow new devices*
+  is open (2 min), automatically for the first devices of a brand-new hub, or once to a
+  device the hub already knew before keys existed. *Forget* tells the device to drop its
+  key. If a device and hub disagree on keys, send `UNPAIR` to the edge over USB.
+- **Web login:** *Hub → Security* sets a password (salted SHA-256); signed-in browsers are
+  remembered (cookie), 5 wrong tries pause sign-in for 30 s. Forgot it? Send `RESETPASS`
+  to the hub over USB.
+- **Emergency hotspot** uses a random per-hub password (shown/changed in *Hub → Security*;
+  `SHOWAP` over USB prints it).
+- **Night lock** (*Hub → Night lock*): manual or scheduled; while active every **ON**
+  command is refused (HTTP 423) and recorded as BLOCKED. OFF always works.
+- **Activity log** (*Activity* tab): every ON/OFF with time and the requesting IP,
+  blocked attempts, pairing, firmware updates, password changes, and device restarts
+  ("restarted (power cut?) — all relays start OFF").
+- Relays are never saved: after any power cut every relay starts **OFF**.
+
+Known limits: the key is sent once in clear during pairing (keep pairing windows short);
+packets are authenticated, not encrypted (someone in radio range could see *that* a relay
+changed, but cannot cause it).
+
+## Protocol (ESP-NOW, v2)
+Packed structs, identical in every sketch (`LEO EDGE PROTOCOL v2` block): `HELLO` →
 `WELCOME` pairing, `SW_STATE` every 2 s (heartbeat) + on change, `SW_INFO` (names,
-watts, GPIOs), `CMD` (relay, all, identify, rename, relay meta, reboot, info),
+watts, GPIOs), `CMD` (relay, all, identify, rename, relay meta, reboot, info, unpair), `PING`,
 `OTA_BEGIN/DATA/END/ACK` (stop-and-wait, 200-byte chunks, resend on timeout).
 Edges accept commands only from the hub they paired with.
 
