@@ -208,8 +208,13 @@ class ToggleAction : ActionCallback {
         val store = DeviceStore(context)
         val id = parameters[KEY_ID] ?: return
         val idx = parameters[KEY_IDX] ?: return
-        val on = parameters[KEY_ON] ?: return
+        val staleOn = parameters[KEY_ON] ?: return
         val device = store.getDevices().find { it.id == id } ?: return
+        // The widget only refreshes every ~30 min, so the "on" baked into the
+        // button can be stale (relay changed from the app/web meanwhile) and
+        // the tap would do nothing. Flip the device's *current* state instead.
+        val current = DeviceApi.state(device)?.relays?.getOrNull(idx)?.on
+        val on = if (current != null) !current else staleOn
         DeviceApi.setRelay(device.baseUrl(), device.token, idx, on)
         LeoWidget().update(context, glanceId)
     }

@@ -147,5 +147,10 @@ fun Context.segmented(options: List<String>, selected: Int, onSelect: (Int) -> U
         btns.add(b); row.addView(b)
     }
     paint(selected)
+    row.tag = { i: Int -> paint(i) }   // lets callers re-select after async loads
     return row
 }
+
+/** Visually select segment [index] of a [segmented] control without firing onSelect. */
+@Suppress("UNCHECKED_CAST")
+fun LinearLayout.selectSegment(index: Int) { (tag as? (Int) -> Unit)?.invoke(index) }

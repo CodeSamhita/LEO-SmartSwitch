@@ -29,8 +29,8 @@ class ConsoleActivity : GlassActivity() {
         .pingInterval(20, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)   // never time out a live stream
         .build()
-    private var socket: WebSocket? = null
-    private var wanted = false
+    @Volatile private var socket: WebSocket? = null
+    @Volatile private var wanted = false
     private val lines = ArrayDeque<String>()
     private val maxLines = 500
 
@@ -67,8 +67,14 @@ class ConsoleActivity : GlassActivity() {
         btnRow.addView(ghostBtn("Reconnect") { connect() },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
         c.addView(btnRow)
+    }
 
-        connect()
+    // Only stream while visible (was: connected in onCreate, closed only in onDestroy).
+    override fun onResume() { super.onResume(); connect() }
+    override fun onPause() {
+        super.onPause()
+        wanted = false
+        socket?.close(1000, "leaving"); socket = null
     }
 
     private fun connect() {
@@ -87,25 +93,29 @@ class ConsoleActivity : GlassActivity() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 runOnUiThread { append(text) }
             }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (!wanted) return
-                runOnUiThread { append("— disconnected, retrying —") }
-                consoleText.postDelayed({ if (wanted) connect() }, 3000)
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = retry(webSocket)
+            // the device closing the socket (reboot etc.) used to end the console silently
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(1000, null); retry(webSocket)
             }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {}
         })
     }
 
-    private fun append(line: String) {
-        lines.addLast(line)
+    /** Reconnect only if [ws] is still the current socket (ignores stale callbacks,
+     *  which previously stacked up duplicate reconnect loops). */
+    private fun retry(ws: WebSocket) {
+        if (!wanted || ws !== socket) return
+        socket = null
+        runOnUiThread { append("— disconnected, retrying —") }
+        consoleText.postDelayed({ if (wanted && socket == null) connect() }, 3000)
+    }
+
+    private fun append(text: String) {
+        // the firmware sends its history as one newline-joined frame
+        text.split('\n').forEach { lines.addLast(it) }
         while (lines.size > maxLines) lines.removeFirst()
         consoleText.text = lines.joinToString("\n")
         consoleScroll.post { consoleScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        wanted = false
-        socket?.close(1000, "leaving")
-    }
 }

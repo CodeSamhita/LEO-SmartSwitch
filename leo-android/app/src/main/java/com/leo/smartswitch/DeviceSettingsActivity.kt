@@ -27,6 +27,9 @@ class DeviceSettingsActivity : GlassActivity() {
     private val mapWatts = ArrayList<EditText>()
     private val mapGpios = ArrayList<Int>()
     private lateinit var relayMapBox: LinearLayout
+    private lateinit var roleSeg: LinearLayout
+    private lateinit var ledSeg: LinearLayout
+    private lateinit var brightSlider: Slider
 
     private fun device() = store.getDevices().find { it.id == deviceId }
 
@@ -48,28 +51,30 @@ class DeviceSettingsActivity : GlassActivity() {
         c.addView(sectionLabel("Role in the group"))
         val roleCard = glassCard()
         roleCard.addView(body("The master owns leoswitch.local; others fail over automatically."))
-        roleCard.addView(segmented(listOf("None", "Master", "Slave"), 0) {
+        roleSeg = segmented(listOf("None", "Master", "Slave"), 0) {
             role = listOf("none", "master", "slave")[it]; saveRole()
-        })
+        }
+        roleCard.addView(roleSeg)
         c.addView(roleCard)
 
         // LED
         c.addView(sectionLabel("Status LED"))
         val ledCard = glassCard()
         ledCard.addView(body("Auto-off lights on changes then sleeps once steady online, so it isn't drawing power 24/7."))
-        ledCard.addView(segmented(listOf("Off", "Auto-off", "Always"), 1) {
+        ledSeg = segmented(listOf("Off", "Auto-off", "Always"), 1) {
             ledMode = listOf("off", "status", "always")[it]
-        })
+        }
+        ledCard.addView(ledSeg)
         val brightLabel = TextView(this).apply {
             text = "Brightness"; setTextColor(col(R.color.moondust_text_secondary)); textSize = 12.5f
             setPadding(0, dp(12), 0, 0)
         }
         ledCard.addView(brightLabel)
-        val slider = Slider(this).apply {
+        brightSlider = Slider(this).apply {
             valueFrom = 0f; valueTo = 255f; value = ledBright.toFloat(); stepSize = 1f
             addOnChangeListener { _, v, _ -> ledBright = v.toInt() }
         }
-        ledCard.addView(slider)
+        ledCard.addView(brightSlider)
         ledTimeoutField = inputField("Auto-off after (seconds, 0 = never)").apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER; setText("30")
         }
@@ -94,9 +99,19 @@ class DeviceSettingsActivity : GlassActivity() {
     private fun loadAll() {
         lifecycleScope.launch {
             val d = device() ?: return@launch
-            DeviceApi.identity(d)?.let { nameField.setText(it.optString("name", "")); role = it.optString("role", "none") }
+            // The controls used to keep their hard-coded initial state (role
+            // "None", LED "Auto-off", brightness 40) after loading, so the
+            // screen showed the wrong settings - and "Save LED" could silently
+            // send values the user never saw.
+            DeviceApi.identity(d)?.let {
+                nameField.setText(it.optString("name", ""))
+                role = it.optString("role", "none")
+                roleSeg.selectSegment(listOf("none", "master", "slave").indexOf(role).coerceAtLeast(0))
+            }
             DeviceApi.ledGet(d)?.let {
-                ledMode = it.optString("mode", "status"); ledBright = it.optInt("brightness", 40)
+                ledMode = it.optString("mode", "status"); ledBright = it.optInt("brightness", 40).coerceIn(0, 255)
+                ledSeg.selectSegment(listOf("off", "status", "always").indexOf(ledMode).coerceAtLeast(0))
+                brightSlider.value = ledBright.toFloat()
                 ledTimeoutField.setText(it.optInt("timeout", 30).toString())
             }
             DeviceApi.relayMapGet(d)?.let { buildMap(it.optJSONArray("relays")) }
@@ -146,7 +161,8 @@ class DeviceSettingsActivity : GlassActivity() {
     }
     private fun identify() {
         lifecycleScope.launch { val d = device() ?: return@launch
-            flash(if (DeviceApi.identify(d)) "Blinking the device LED" else "Couldn't reach device", ok = true) }
+            val ok = DeviceApi.identify(d)
+            flash(if (ok) "Blinking the device LED" else "Couldn't reach device", ok = ok) }
     }
     private fun saveMap() {
         val arr = JSONArray()

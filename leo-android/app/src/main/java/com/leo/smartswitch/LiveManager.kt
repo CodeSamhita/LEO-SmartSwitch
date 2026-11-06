@@ -30,10 +30,15 @@ object LiveManager {
     val updates: SharedFlow<DeviceState> = _updates
 
     fun connect(device: SavedDevice) {
-        wanted[device.id] = device
+        val prev = wanted.put(device.id, device)
+        // re-open if the host/port/token changed (e.g. after logging in)
+        if (prev != null && (prev.baseUrl() != device.baseUrl() || prev.token != device.token)) {
+            sockets.remove(device.id)?.close(1000, "reconfigure")
+        }
         openSocket(device)
     }
 
+    @Synchronized
     private fun openSocket(device: SavedDevice) {
         if (sockets.containsKey(device.id)) return
         val url = device.baseUrl().replace("http://", "ws://") + "/ws"
@@ -50,18 +55,23 @@ object LiveManager {
                 }
             }
 
+            // remove(key, value): only drop the map entry if it is still THIS
+            // socket - a late callback from an old socket used to remove the
+            // newer replacement, leaving a live socket nobody could close.
+            // A server-side close (device reboot, firmware dropping a slow
+            // client) also reconnects now; previously only onFailure did, so
+            // live updates silently stopped until the screen was reopened.
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(1000, null)
-                sockets.remove(device.id)
+                if (sockets.remove(device.id, webSocket)) scheduleReconnect(device.id)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                sockets.remove(device.id)
+                if (sockets.remove(device.id, webSocket)) scheduleReconnect(device.id)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                sockets.remove(device.id)
-                scheduleReconnect(device.id)
+                if (sockets.remove(device.id, webSocket)) scheduleReconnect(device.id)
             }
         })
         sockets[device.id] = socket

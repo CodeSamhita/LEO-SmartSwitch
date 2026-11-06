@@ -11,8 +11,10 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class AddDeviceActivity : GlassActivity() {
 
@@ -55,11 +57,20 @@ class AddDeviceActivity : GlassActivity() {
         refreshSaved()
     }
 
+    private var scanJob: Job? = null
+
+    // Each tap used to start another never-ending discovery on top of the
+    // previous one (multicast lock held the whole time the screen was open).
+    // Now: cancel the old scan, and stop after 15 s.
     private fun startScan() {
+        scanJob?.cancel()
         discovered.removeAllViews()
         flash("Scanning…")
-        lifecycleScope.launch {
-            Discovery(this@AddDeviceActivity).discoverAll().collect { found -> addDiscovered(found) }
+        scanJob = lifecycleScope.launch {
+            withTimeoutOrNull(15_000) {
+                Discovery(this@AddDeviceActivity).discoverAll().collect { found -> addDiscovered(found) }
+            }
+            if (discovered.childCount == 0) flash("No devices found — try adding by IP", ok = false)
         }
     }
 

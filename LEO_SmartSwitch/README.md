@@ -1,5 +1,14 @@
 # LEO Smart Switch — ESP32-C3 (Phase 1)
 
+## What's new (v1.4.3 — stability pass)
+- **Save WiFi / Save AP / Reboot / Factory reset now report success.** Handlers called `delay()`+`ESP.restart()` on the AsyncTCP task, so the reply never left the device and the UI/app always showed a failure. Restarts are now scheduled from `loop()` after the reply is sent.
+- **Live console no longer disconnects on connect.** Replaying the 200-line history as 200 frames overflowed AsyncWebSocket's per-client queue (32), which closes the client → endless reconnect loop. History is now sent as one frame.
+- **Faster toggles.** `LittleFS.usedBytes()` (a full filesystem walk) ran on every telemetry push and every relay toggle; it's cached and refreshed every 30 s. All On/Off pushes telemetry once instead of four times, and re-setting a relay to its current state no longer resets its on-timer.
+- **WiFi event work moved off the event task** (mode switches, mDNS restart, UDP rebind, flash writes) into `loop()`. Retry interval raised 8 s → 15 s so slow handshakes aren't aborted mid-way.
+- **No more login lock-outs:** enabling login without a username/password is rejected; the browser that turns login on gets a token; passwords stored by pre-1.3.1 firmware are accepted once and upgraded to SHA-256.
+- **Log fixes:** storage-pressure pruning no longer wipes the log to one line; normal events ("WiFi connected", "NTP sync") are INFO, not persisted as errors.
+- Watchdog timeout is actually applied on core 3.x (`esp_task_wdt_reconfigure`); `Origin` `.local` check tightened to a real host suffix; console ring buffer is lock-protected.
+
 ## What's new (v1.4.2 — full-codebase bug audit)
 - **Fixed real cross-task race conditions.** HTTP/WS handlers run on the
   AsyncTCP task while `loop()` runs on the main Arduino task - several
@@ -155,7 +164,7 @@ from hangs, and advertises itself as a discoverable smart-home device on your LA
 ```mermaid
 flowchart TB
     subgraph Client["Browser / Android widget"]
-      UI["index.html control panel"]
+      UI["embedded web UI"]
       WSC["WebSocket client"]
     end
     subgraph ESP["ESP32-C3 firmware"]
@@ -288,14 +297,12 @@ for detection, so a hostname clash can never hide a device.
 LEO_SmartSwitch/
 ├── README.md                ← this file
 ├── platformio.ini           ← PlatformIO build (optional alternative to Arduino IDE)
-├── LEO_SmartSwitch.ino       ← firmware (C++)
-├── config.h                 ← pins, defaults, tuning constants
-└── data/
-    └── index.html           ← web UI, flashed to LittleFS
+└── LEO_SmartSwitch.ino      ← EVERYTHING: config constants (top), firmware, embedded web UI
 ```
 
-> The folder name **must** match the `.ino` name for the Arduino IDE.
-> `data/` is the LittleFS image (the web UI), flashed separately from the sketch.
+> Single-file sketch: the old `config.h` is now the CONFIG block at the top of the
+> `.ino`, and the web UI is embedded as `INDEX_HTML`. Just upload the sketch — no
+> separate LittleFS/data upload step. The folder name **must** match the `.ino` name.
 
 ---
 
@@ -308,8 +315,7 @@ Uses the maintained `ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP` (see 
 | Step | Command |
 |------|---------|
 | Build | `pio run` |
-| Flash firmware | `pio run -t upload` |
-| Flash web UI (LittleFS) | `pio run -t uploadfs` |
+| Flash firmware + web UI | `pio run -t upload` |
 | Serial monitor | `pio device monitor` |
 
 `platformio.ini` already pins the board, LittleFS filesystem, and libraries.
@@ -322,8 +328,7 @@ Uses the maintained `ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP` (see 
    - *ArduinoJson* (**v7**)
    - *Adafruit NeoPixel*
    > Use the **ESP32Async** versions. The old me-no-dev / mathieucarbou packages are archived; installing the wrong fork is the #1 reason the build fails.
-3. **LittleFS uploader:** install the *arduino-littlefs-upload* plugin.
-4. **Board settings:**
+3. **Board settings:**
 
    | Setting | Value |
    |---------|-------|
@@ -332,8 +337,7 @@ Uses the maintained `ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP` (see 
    | USB CDC On Boot | Enabled |
    | Upload speed | 921600 (lower if it fails) |
 
-5. **Upload sketch:** the normal Upload button.
-6. **Upload web UI:** `Ctrl/Cmd + Shift + P` → *Upload LittleFS to Pico/ESP8266/ESP32*.
+4. **Upload:** the normal Upload button — that's it (web UI is inside the sketch).
 
 ---
 
@@ -383,7 +387,7 @@ send the `X-Auth-Token` header obtained from `/api/login`.
 
 ---
 
-## 11. Tunable constants (`config.h`)
+## 11. Tunable constants (CONFIG block at the top of the `.ino`)
 
 | Constant | Default | Meaning |
 |----------|---------|---------|
@@ -392,7 +396,7 @@ send the `X-Auth-Token` header obtained from `/api/login`.
 | `WIFI_TX_POWER` | `8.5 dBm` | Low TX power for C3 RF stability |
 | `TICK_PUSH_MS` | `1000` | Telemetry push cadence |
 | `ENERGY_FLUSH_MS` | `60000` | Energy persistence interval |
-| `STA_RETRY_MS` | `8000` | WiFi reconnect retry |
+| `STA_RETRY_MS` | `15000` | WiFi reconnect retry |
 | `WDT_TIMEOUT_S` | `10` | Watchdog reboot threshold |
 | `DEFAULT_TZ` | `IST-5:30` | Timezone (India, no DST) |
 | `LOG_MAX_AGE_DAYS` | `90` | Log retention (~3 months) |
@@ -418,10 +422,10 @@ send the `X-Auth-Token` header obtained from `/api/login`.
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| Compile error in ESPAsyncWebServer | Using the old me-no-dev fork — switch to **mathieucarbou** |
-| Web UI is blank / 404 at `/` | LittleFS image not flashed — run the *Upload LittleFS* / `uploadfs` step |
+| Compile error in ESPAsyncWebServer | Using the old me-no-dev / mathieucarbou fork — switch to **ESP32Async** |
+| Settings don't persist | Partition scheme has no filesystem — pick one with SPIFFS/LittleFS |
 | `leoswitch.local` won't resolve | Use the IP shown on the clock row; some networks block mDNS |
-| Relays click ON at boot | Confirm the board is **active-LOW**; check `RELAY_ACTIVE_LOW` in `config.h` |
+| Relays click ON at boot | Confirm the board is **active-LOW**; check `RELAY_ACTIVE_LOW` in the CONFIG block |
 | WiFi unstable on C3 | Keep `WIFI_TX_POWER` low; check antenna/USB power quality |
 | Not visible in UPnP browser | Normal on some networks — use mDNS / the app instead |
 | Clock shows `~` after time | NTP not yet reached; it's running on the internal clock |
@@ -453,7 +457,7 @@ the touch is expected. "Hot" beyond that usually comes from:
   longer stays fully powered 100% of the time. Biggest single reduction. (If your
   WiFi gets flaky on a particular C3 clone, set it back to `false` — that's the
   heat/stability trade-off.)
-- **CPU drops to 80 MHz** (`CPU_MHZ` in `config.h`) — about half the dynamic power
+- **CPU drops to 80 MHz** (`CPU_MHZ` in the CONFIG block) — about half the dynamic power
   of 160 MHz, and still plenty for the web server. Raise to 160 if you want it.
 - TX power is already held low for the C3 (`WIFI_TX_POWER`).
 

@@ -94,7 +94,8 @@ class EnergyActivity : GlassActivity() {
         val t = tariffField.text.toString().toDoubleOrNull() ?: run { flash("Enter a number", ok = false); return }
         lifecycleScope.launch {
             val d = device() ?: return@launch
-            flash(if (DeviceApi.setTariff(d, t)) "Tariff saved" else "Save failed", ok = true)
+            val ok = DeviceApi.setTariff(d, t)
+            flash(if (ok) "Tariff saved" else "Save failed", ok = ok)
             load()
         }
     }

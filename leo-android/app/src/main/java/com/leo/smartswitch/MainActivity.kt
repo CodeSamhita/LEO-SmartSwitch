@@ -145,6 +145,7 @@ class MainActivity : GlassActivity() {
         masterCard.visibility = if (devices.isEmpty()) View.GONE else View.VISIBLE
 
         deviceList.removeAllViews()
+        lastRelays.clear()                          // cards are new: next update must draw pills
         devices.forEachIndexed { i, d -> addDeviceCard(d, i) }
         lifecycleScope.launch { runCatching { LeoWidget().updateAll(this@MainActivity) } }
     }
@@ -214,10 +215,16 @@ class MainActivity : GlassActivity() {
             Anim.gradientText(this, col(R.color.moondust_accent), col(R.color.moondust_accent2))
         }
         setDot(card, true)
+        // The WebSocket pushes every second. Rebuilding every pill each tick
+        // swallowed taps that landed mid-rebuild and caused constant layout
+        // work; only rebuild when the relays actually changed.
+        if (lastRelays[s.id] == s.relays) return
+        lastRelays[s.id] = s.relays
         val grid = card.findViewWithTag<GridLayout>("relays")
         grid.removeAllViews()
         s.relays.forEachIndexed { i, r -> grid.addView(relayPill(s.id, i, r)) }
     }
+    private val lastRelays = HashMap<String, List<Relay>>()
 
     private fun relayPill(deviceId: String, index: Int, relay: Relay): MaterialButton {
         val btn = MaterialButton(this).apply {
@@ -244,7 +251,8 @@ class MainActivity : GlassActivity() {
             lifecycleScope.launch {
                 val d = store.getDevices().find { it.id == deviceId } ?: return@launch
                 if (!DeviceApi.setRelay(d.baseUrl(), d.token, index, next)) {
-                    paintPill(btn, !next); flash("Couldn't reach ${d.name}", ok = false)
+                    paintPill(btn, !next); lastRelays.remove(deviceId)
+                    flash("Couldn't reach ${d.name}", ok = false)
                 }
             }
         }

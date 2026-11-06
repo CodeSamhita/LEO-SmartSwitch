@@ -26,6 +26,7 @@ class DeviceDetailActivity : GlassActivity() {
     private lateinit var costTxt: TextView
     private lateinit var relayBox: LinearLayout
     private val statVals = HashMap<String, TextView>()
+    private var lastRelays: List<Relay>? = null
 
     private fun device(): SavedDevice? = store.getDevices().find { it.id == deviceId }
 
@@ -148,6 +149,9 @@ class DeviceDetailActivity : GlassActivity() {
         statVals["Firmware"]?.text = s.version
         statVals["Uptime"]?.text = s.uptime
         statVals["IP"]?.text = s.ip.ifEmpty { "—" }
+        // only rebuild rows when relays changed (was every ~1 s, eating taps)
+        if (s.relays == lastRelays) return
+        lastRelays = s.relays
         relayBox.removeAllViews()
         s.relays.forEachIndexed { i, r -> relayBox.addView(relayRow(i, r)) }
     }
@@ -192,7 +196,8 @@ class DeviceDetailActivity : GlassActivity() {
             lifecycleScope.launch {
                 val d = device() ?: return@launch
                 if (!DeviceApi.setRelay(d.baseUrl(), d.token, index, next)) {
-                    paintToggle(toggle, !next); flash("Couldn't switch ${relay.name}", ok = false)
+                    paintToggle(toggle, !next); lastRelays = null
+                    flash("Couldn't switch ${relay.name}", ok = false)
                 }
             }
         }

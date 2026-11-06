@@ -85,8 +85,10 @@ object DeviceApi {
     private fun open(urlStr: String, method: String, token: String?): HttpURLConnection {
         val c = (URL(urlStr).openConnection() as HttpURLConnection)
         c.requestMethod = method
-        c.connectTimeout = 1500
-        c.readTimeout = 1500
+        // 1.5 s was too tight for an 80 MHz ESP32-C3 serving several clients
+        // (energy/scan/relaymap calls regularly timed out -> "Save failed").
+        c.connectTimeout = 3000
+        c.readTimeout = 4000
         token?.let { c.setRequestProperty("X-Auth-Token", it) }
         if (method == "POST") {
             c.doOutput = true

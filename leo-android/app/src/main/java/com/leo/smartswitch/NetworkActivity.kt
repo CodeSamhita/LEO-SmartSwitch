@@ -114,15 +114,18 @@ class NetworkActivity : GlassActivity() {
         if (ssid.isEmpty()) { flash("Enter a network name", ok = false); return }
         lifecycleScope.launch {
             val d = device() ?: return@launch
-            flash(if (DeviceApi.joinWifi(d, ssid, passF.text.toString())) "Saved — device reconnecting…" else "Save failed",
-                ok = true)
+            val ok = DeviceApi.joinWifi(d, ssid, passF.text.toString())
+            flash(if (ok) "Saved — device reconnecting…" else "Save failed", ok = ok)
         }
     }
 
     private fun setAp(ssidF: EditText, passF: EditText) {
+        val pass = passF.text.toString()
+        if (pass.isNotEmpty() && pass.length < 8) { flash("AP password needs at least 8 characters", ok = false); return }
         lifecycleScope.launch {
             val d = device() ?: return@launch
-            flash(if (DeviceApi.setAp(d, ssidF.text.toString().trim(), passF.text.toString())) "Access point saved — rebooting…" else "Save failed")
+            val ok = DeviceApi.setAp(d, ssidF.text.toString().trim(), pass)
+            flash(if (ok) "Access point saved — rebooting…" else "Save failed", ok = ok)
         }
     }
 
@@ -130,7 +133,8 @@ class NetworkActivity : GlassActivity() {
         val host = mdnsField.text.toString().trim()
         lifecycleScope.launch {
             val d = device() ?: return@launch
-            flash(if (DeviceApi.setMdns(d, host)) "mDNS updated" else "Invalid name", ok = true)
+            val ok = DeviceApi.setMdns(d, host)
+            flash(if (ok) "mDNS updated" else "Invalid name", ok = ok)
             loadIdentity()
         }
     }
