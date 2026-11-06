@@ -20,11 +20,13 @@
 #include <ESPmDNS.h>
 #include <AsyncUDP.h>
 #include <LittleFS.h>
+#include <Update.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
 #include <esp_task_wdt.h>
+#include <esp_mac.h>
 #include <esp_sntp.h>
 #include <mbedtls/sha256.h>
 #include <time.h>
@@ -39,7 +41,7 @@
    Anything the user can change at runtime lives in NVS/LittleFS, not here.
    ===================================================================== */
 
-#define FW_VERSION         "1.4.3-cluster"
+#define FW_VERSION         "1.5.0-cluster"
 #define DEVICE_MODEL       "LEO-C3"
 
 /* ---- Identity -------------------------------------------------------- */
@@ -106,7 +108,7 @@ static const int  RELAY_GPIO_POOL[RELAY_COUNT] = { 0, 1, 3, 10 };
 /* ---- Storage / logs -------------------------------------------------- */
 #define FS_FILL_LIMIT      0.80     // prune logs above 80% LittleFS usage
 #define LOG_MAX_AGE_DAYS   90       // ~3 months
-#define LOG_MAX_LINES      400      // hard cap regardless of size
+#define LOG_MAX_LINES      200      // hard cap regardless of size (data partition is 128 KB with OTA)
 #define ENERGY_DAYS        31       // rolling window for the 30-day graph
 
 #define CFG_FILE           "/config.json"
@@ -165,10 +167,11 @@ volatile uint32_t restartAt = 0;
 volatile bool     restartSaveEnergy = true;
 volatile bool     netUpPending = false;
 volatile bool     netDownPending = false;
-static void scheduleRestart(uint32_t inMs, bool saveEnergy) {
-  restartSaveEnergy = saveEnergy;
-  uint32_t t = millis() + inMs; restartAt = t ? t : 1;
-}
+bool   otaFailed = false;         // OTA upload state (AsyncTCP task only)
+String otaErr;
+/* (scheduleRestart() is defined in HELPERS below: Arduino inserts its
+   auto-generated prototypes just above the first function in the file, so
+   no function may appear before the struct definitions in STATE.) */
 
 /* ============================== STATE ============================== */
 struct RelayCh {
@@ -279,6 +282,10 @@ void pushTelemetry();
 String telemetryJson();
 
 /* ============================ HELPERS ============================== */
+static void scheduleRestart(uint32_t inMs, bool saveEnergy) {
+  restartSaveEnergy = saveEnergy;
+  uint32_t t = millis() + inMs; restartAt = t ? t : 1;
+}
 static uint32_t fnv1a(const String& s) {
   uint32_t h = 2166136261u;
   for (size_t i = 0; i < s.length(); ++i) { h ^= (uint8_t)s[i]; h *= 16777619u; }
@@ -556,7 +563,11 @@ void dbg(const String& msg) {
   consoleHead = (consoleHead + 1) % CONSOLE_LINES;
   if (consoleCount < CONSOLE_LINES) consoleCount++;
   if (consoleLock) xSemaphoreGive(consoleLock);
-  if (Serial) Serial.println(line);
+  // Never block on USB serial: with the cable in a PC but no terminal reading
+  // the port, `if (Serial)` is still true and println() stalled ~4 s per relay
+  // toggle once the TX buffer filled. Only write when it fits right now.
+  size_t need = strlen(line) + 2;
+  if (Serial && Serial.availableForWrite() >= (int)need) Serial.println(line);
   if (consoleWs.count()) consoleWs.textAll(line);
 }
 /* Whole ring buffer as ONE newline-joined frame. Replaying it as up to 200
@@ -681,8 +692,14 @@ void ledTick() {
    a tiny SSDP/UPnP responder (generic network / UPnP device lists).        */
 void buildIdentity() {
   if (gId.length()) return;
-  String m = WiFi.macAddress(); m.replace(":", ""); m.toLowerCase();   // 12 hex
-  if (m.length() < 12) m = "000000000000";
+  // Read the factory MAC straight from eFuse. WiFi.macAddress() returns
+  // 00:00:00:00:00:00 on core 3.x until the WiFi driver has started, which
+  // gave EVERY unit the id "LEO-000000" - so each switch ignored every other
+  // one as "itself" and cluster discovery never worked.
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  char mb[13]; snprintf(mb, sizeof(mb), "%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  String m(mb);
   String id6 = m.substring(6);                       // last 6 hex = unique tag
   gIdSuffix = id6;
   gId   = "LEO-" + id6;                               // STABLE id (mDNS-independent)
@@ -690,7 +707,8 @@ void buildIdentity() {
   gUUID = "uuid:4c454f53-" + m.substring(0, 4) + "-" + m.substring(4, 8) + "-8a2e-" + m;
   // cfg.mdnsHost stays "" = auto: the leoswitch.local owner is elected at runtime.
   // same firmware on every unit -> AP name == device id so they always correspond
-  if (!cfg.apSsid.length() || cfg.apSsid == DEFAULT_AP_SSID) cfg.apSsid = gId;
+  // "LEO-000000" = an AP name saved by the zero-MAC bug above; re-derive it
+  if (!cfg.apSsid.length() || cfg.apSsid == DEFAULT_AP_SSID || cfg.apSsid == "LEO-000000") cfg.apSsid = gId;
 }
 
 /* ---- leoswitch.local ownership election (mDNS-independent detection) ----
@@ -1079,592 +1097,671 @@ void pushTelemetry() { if (ws.count()) ws.textAll(telemetryJson()); }
    LittleFS now only holds config/energy/logs, and those files are no longer
    web-reachable (serveStatic used to expose /config.json with the WiFi
    password and /auth.json with login tokens to anyone on the LAN). */
-static const char INDEX_HTML[] PROGMEM = R"LEOHTML(<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>LEO Smart Switch</title>
-<style>
-:root{
-  --bg:#0c0f12;--surface:#14191e;--surface2:#1b222a;--line:#26303a;
-  --txt:#e7edf2;--muted:#8aa0b2;--accent:#34d3b0;--on:#34d3b0;--off:#3a4651;
-  --warn:#f0a93b;--bad:#e2564b;--good:#46c46a;--pwr:#f0a93b;--navh:62px;--r:14px}
-*{box-sizing:border-box}
-body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#13202022,transparent),var(--bg);
-  color:var(--txt);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  -webkit-tap-highlight-color:transparent}
-button{font:inherit;color:inherit;cursor:pointer}
-.wrap{max-width:560px;margin:0 auto;padding:14px 14px calc(var(--navh) + 24px)}
-@media(min-width:760px){.wrap{max-width:1000px;padding:22px 24px calc(var(--navh) + 28px)}}
-@media(min-width:1200px){.wrap{max-width:1140px}}
-
-/* header */
-header{display:flex;align-items:center;gap:11px;padding:2px 2px 0}
-.logo{width:40px;height:40px;border-radius:11px;flex:0 0 auto;background:linear-gradient(150deg,#1d2730,#10161b);
-  border:1px solid var(--line);display:grid;place-items:center;cursor:pointer}
-.logo svg{width:22px;height:22px}
-.htitle{flex:1;min-width:0;cursor:pointer}
-.htitle h1{margin:0;font-size:16px;font-weight:650;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sub{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--muted);margin-top:1px}
-.pill{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:20px;background:var(--surface2);
-  border:1px solid var(--line);font-weight:600;font-size:10.5px;letter-spacing:.4px}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
-.pill.wifi .dot{background:var(--good)}.pill.ap .dot{background:var(--accent)}
-.pill.reconnecting .dot{background:var(--warn);animation:bl 1s infinite}
-.rolebadge{font-size:9.5px;font-weight:700;letter-spacing:.5px;padding:2px 7px;border-radius:20px;border:1px solid var(--line)}
-.rolebadge.master{color:var(--accent);border-color:#2a4a44}.rolebadge.slave{color:var(--muted)}
-@keyframes bl{50%{opacity:.25}}
-
-.clockrow{display:flex;justify-content:space-between;align-items:baseline;margin:12px 2px 10px}
-.clock{font-size:30px;font-weight:300;letter-spacing:1px;font-variant-numeric:tabular-nums}
-@media(min-width:760px){.clock{font-size:38px}}
-.clock small{font-size:13px;color:var(--muted);margin-left:6px}
-.ipv{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
-
-.statsbar{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);margin-bottom:14px;overflow:hidden}
-.statshead{display:flex;gap:14px;align-items:center;padding:11px 14px;cursor:pointer}
-.statshead .s{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-.statshead .s b{color:var(--txt);font-weight:600}
-.statshead .chev{margin-left:auto;transition:.15s;stroke:var(--muted);width:16px;height:16px}
-.statsbar.open .chev{transform:rotate(180deg)}
-.statsdetail{display:none;border-top:1px solid var(--line);padding:6px 14px 12px}
-.statsbar.open .statsdetail{display:block}
-.kv{display:flex;justify-content:space-between;padding:5px 0;font-size:12.5px;border-bottom:1px dashed #1e2731}
-.kv:last-child{border:0}.kv span{color:var(--muted)}.kv b{font-weight:600;font-variant-numeric:tabular-nums}
-
-.master{display:flex;gap:10px;margin-bottom:14px}
-.master button{flex:1;padding:13px;border-radius:var(--r);border:1px solid var(--line);background:var(--surface);
-  font-weight:650;letter-spacing:.3px;transition:.15s}
-.master .allon{color:var(--on)}.master .alloff{color:var(--muted)}
-.master button:active{transform:scale(.98)}
-
-#peers{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:11px}
-#relays{display:block}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:13px 14px}
-.card.on{border-color:#2a4a44;background:linear-gradient(180deg,#16201d,var(--surface))}
-.relayrow{display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:1px dashed #1e2731}
-.relayrow:last-child{border:0}
-.cmeta{flex:1;min-width:0}
-.cname{font-size:14px;font-weight:600}
-.cline{font-size:11px;color:var(--muted);margin-top:2px;font-variant-numeric:tabular-nums}
-.cline .pw{color:var(--pwr)}
-.tgl{width:58px;height:32px;border-radius:20px;border:1px solid var(--line);background:var(--off);position:relative;flex:0 0 auto;transition:.15s}
-.tgl:after{content:"";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#cfd8df;transition:.15s}
-.tgl.on{background:var(--on)}.tgl.on:after{left:29px;background:#06231e}
-
-/* device (peer) cards */
-.devcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px}
-.devhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.devhead .nm{flex:1;min-width:0;font-size:15px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.devhead .self{font-size:10px;color:var(--accent);margin-left:6px}
-.devmeta{font-size:11.5px;color:var(--muted);margin-bottom:10px;font-variant-numeric:tabular-nums}
-.minigrid{display:flex;gap:6px}
-.minibtn{flex:1;height:38px;border-radius:9px;border:1px solid var(--line);background:var(--off);color:var(--txt);font-weight:700;font-size:11px}
-.minibtn.on{background:var(--on);color:#06231e;border-color:#2a4a44}
-.devactions{display:flex;gap:8px;margin-top:10px}
-.linkbtn{flex:1;padding:9px;border-radius:9px;border:1px solid var(--line);background:transparent;color:var(--txt);font-size:12px;text-align:center;text-decoration:none}
-
-h3{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:18px 0 10px}
-.page>h3:first-child{margin-top:4px}
-.field{margin-bottom:13px}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
-input,select{width:100%;padding:10px 11px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--txt);font:inherit}
-.cardbox{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:14px}
-.btn{width:100%;padding:11px;border-radius:11px;border:1px solid var(--accent);background:var(--accent);color:#06231e;font-weight:700;margin-top:4px}
-.btn.ghost{background:transparent;color:var(--txt);border-color:var(--line)}
-.btn.danger{background:transparent;color:var(--bad);border-color:#5a2a26}
-.row2{display:flex;gap:8px}.row2>*{flex:1}
-.note{font-size:11.5px;color:var(--muted);margin:8px 0}
-.seg{display:flex;gap:6px}
-.seg button{flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--muted);font-weight:600;font-size:12px}
-.seg button.sel{background:var(--accent);color:#06231e;border-color:var(--accent)}
-.netitem{display:flex;justify-content:space-between;align-items:center;padding:9px 11px;border:1px solid var(--line);border-radius:10px;margin-bottom:7px;background:var(--surface);cursor:pointer}
-canvas{width:100%;height:170px;display:block;background:var(--surface);border:1px solid var(--line);border-radius:11px}
-.energytot{display:flex;gap:10px;margin:12px 0}
-.energytot div{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:11px;text-align:center}
-.energytot b{display:block;font-size:20px;font-weight:600;margin-top:2px}
-.logbox{background:#0a0d10;border:1px solid var(--line);border-radius:11px;padding:10px;font:11px ui-monospace,monospace;color:#a9b7c2;max-height:240px;overflow:auto;white-space:pre-wrap}
-.subtabs{display:flex;gap:6px;overflow-x:auto;margin-bottom:14px}
-.subtabs button{white-space:nowrap;padding:7px 11px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--muted);font-size:12px;font-weight:600}
-.subtabs button.sel{color:#06231e;background:var(--accent);border-color:var(--accent)}
-.page{display:none}.page.active{display:block}
-.tg{display:flex;align-items:center;gap:9px;font-size:13px}
-.err{color:var(--bad);font-size:12px;min-height:16px}
-
-/* footer nav */
-nav{position:fixed;left:0;right:0;bottom:0;height:var(--navh);background:#0e1318ee;backdrop-filter:blur(8px);
-  border-top:1px solid var(--line);display:flex;z-index:20;padding-bottom:env(safe-area-inset-bottom)}
-nav button{flex:1;background:none;border:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
-  gap:3px;color:var(--muted);font-size:10px;font-weight:600}
-nav button svg{width:21px;height:21px;stroke:var(--muted);fill:none;stroke-width:1.7}
-nav button.sel{color:var(--accent)}nav button.sel svg{stroke:var(--accent)}
-@media(min-width:760px){nav{max-width:560px;left:50%;transform:translateX(-50%);border-radius:16px 16px 0 0;border:1px solid var(--line);border-bottom:0}}
-
-/* modals / login */
-.modal{position:fixed;inset:0;background:#000a;backdrop-filter:blur(2px);display:none;place-items:center;z-index:40;padding:24px}
-.modal.show{display:grid}
-.modalbox{width:min(360px,100%);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;text-align:center}
-.modalbox h2{margin:0 0 8px;font-size:17px}
-.modalbox p{color:var(--muted);font-size:13px;margin:0 0 16px}
-.login{position:fixed;inset:0;background:var(--bg);display:none;place-items:center;z-index:50;padding:24px}
-.login.show{display:grid}
-</style>
-</head>
-<body>
-
-<!-- login overlay -->
-<div class="login" id="login"><div style="width:min(340px,100%);text-align:center">
-  <div class="logo" style="margin:0 auto 14px;width:54px;height:54px"><svg viewBox="0 0 24 24" fill="none" stroke="#34d3b0" stroke-width="1.7"><path d="M9 18h6M10 21h4M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z"/></svg></div>
-  <h2 style="margin:0 0 14px">Sign in</h2>
-  <div class="field"><input id="lu" placeholder="Username"></div>
-  <div class="field"><input id="lp" type="password" placeholder="Password"></div>
-  <button class="btn" onclick="doLogin()">Sign in</button>
-  <div class="err" id="lerr"></div>
-</div></div>
-
-<!-- unsaved-changes guard -->
-<div class="modal" id="dirtyModal"><div class="modalbox">
-  <h2>Unsaved changes</h2>
-  <p>You were editing settings. Finish saving first, or discard your changes?</p>
-  <button class="btn ghost" onclick="closeDirty()">Continue setup</button>
-  <button class="btn danger" style="margin-top:8px" onclick="discardAndGo()">Discard &amp; leave</button>
-</div></div>
-
-<div class="wrap">
-  <header>
-    <div class="logo" onclick="goHome()"><svg viewBox="0 0 24 24" fill="none" stroke="#34d3b0" stroke-width="1.6"><path d="M9 18h6M10 21h4M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z"/></svg></div>
-    <div class="htitle" onclick="goHome()">
-      <h1 id="hname">Smart Switch</h1>
-      <div class="sub">
-        <span class="pill" id="conn"><span class="dot"></span><span id="connt">…</span></span>
-        <span class="rolebadge" id="roleBadge" style="display:none"></span>
-      </div>
-    </div>
-  </header>
-
-  <!-- HOME -->
-  <section class="page active" id="p-home">
-    <div class="clockrow"><div class="clock" id="clock">--:--<small id="ampm"></small></div><div class="ipv" id="ipv">—</div></div>
-    <div class="statsbar" id="statsbar">
-      <div class="statshead" onclick="document.getElementById('statsbar').classList.toggle('open')">
-        <div class="s"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f0a93b" stroke-width="1.8"><path d="M14 4v6l5 9H5l5-9V4M9 4h6"/></svg><b id="temp">—</b></div>
-        <div class="s"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#46c46a" stroke-width="1.8"><path d="M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01"/></svg><b id="rssi">—</b></div>
-        <div class="s"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8aa0b2" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><b id="uptime">—</b></div>
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
-      </div>
-      <div class="statsdetail" id="statsdetail"></div>
-    </div>
-    <div class="master"><button class="allon" onclick="setAll(true)">All On</button><button class="alloff" onclick="setAll(false)">All Off</button></div>
-    <div id="relays"></div>
-  </section>
-
-  <!-- DEVICES -->
-  <section class="page" id="p-devices">
-    <h3>This device</h3>
-    <div class="cardbox">
-      <div class="field" style="margin:0"><label>Role — who is in charge of the group</label>
-        <div class="seg" id="roleSeg">
-          <button data-r="none" onclick="setRole('none')">None</button>
-          <button data-r="master" onclick="setRole('master')">Master</button>
-          <button data-r="slave" onclick="setRole('slave')">Slave</button>
-        </div></div>
-      <div class="err" id="roleErr"></div>
-    </div>
-    <h3 id="devCount">Smart switches on your network</h3>
-    <p class="note">Detected by a stable device ID broadcast on the LAN — independent of mDNS. Controlling any one here reaches them all.</p>
-    <div class="row2" style="margin-bottom:12px">
-      <input id="manualIp" placeholder="Add a device by IP (e.g. 192.168.1.50)">
-      <button class="btn" style="margin:0;max-width:120px" onclick="addManual()">Add</button>
-    </div>
-    <div id="peers"></div>
-  </section>
-
-  <!-- ENERGY -->
-  <section class="page" id="p-energy">
-    <h3>Last 30 days</h3>
-    <canvas id="chart" width="500" height="170"></canvas>
-    <div class="energytot"><div>kWh (30d)<b id="e-kwh">—</b></div><div>Cost (30d)<b id="e-cost">—</b></div></div>
-    <div class="cardbox track">
-      <div class="field" style="margin:0"><label>Tariff (₹ / kWh)</label><input id="tariff" type="number" step="0.01"></div>
-    </div>
-    <button class="btn" onclick="saveTariff()">Save tariff</button>
-    <p class="note">Estimated from wattage × on-time, not metered.</p>
-  </section>
-
-  <!-- NETWORK -->
-  <section class="page" id="p-network">
-    <h3>Identity</h3>
-    <div class="cardbox" id="idSummary" style="font-variant-numeric:tabular-nums"></div>
-    <div class="cardbox track">
-      <div class="field"><label>Device name</label><input id="devName" placeholder="e.g. Living Room Switch"></div>
-      <button class="btn ghost" onclick="saveName()">Save name</button>
-      <div class="field" style="margin-top:14px"><label>mDNS hostname (recovery address, no spaces)</label>
-        <div class="row2"><input id="mdnsHost" placeholder="leoswitch"><button class="btn" style="margin:0;max-width:120px" onclick="saveMdns()">Apply</button></div></div>
-      <p class="note" id="mdnsNote">Default is automatic: one unit owns <b>leoswitch.local</b> (the master, or the lowest-ID device, with automatic failover) and the rest use <b>leo-&lt;id&gt;.local</b>. Set a fixed name here to pin this unit, or type <b>auto</b> to hand it back to the election. Detection itself never depends on mDNS.</p>
-    </div>
-
-    <h3>Connection</h3>
-    <p class="note" id="netcur">—</p>
-    <button class="btn ghost" onclick="scan()">Scan for networks</button>
-    <div id="netlist" style="margin-top:10px"></div>
-    <div class="cardbox track" style="margin-top:12px">
-      <div class="field"><label>Join WiFi — SSID</label><input id="sta-ssid"></div>
-      <div class="field"><label>Password</label><input id="sta-pass" type="password"></div>
-      <button class="btn" onclick="saveSta()">Save &amp; reconnect</button>
-    </div>
-
-    <h3>Access Point</h3>
-    <div class="cardbox track">
-      <div class="field"><label>AP name</label><input id="ap-ssid"></div>
-      <div class="field"><label>AP password (min 8)</label><input id="ap-pass" type="password" placeholder="leave blank to keep"></div>
-      <button class="btn ghost" onclick="saveAp()">Save AP &amp; reboot</button>
-    </div>
-  </section>
-
-  <!-- SYSTEM -->
-  <section class="page" id="p-system">
-    <div class="subtabs" id="sysTabs">
-      <button data-s="time" class="sel" onclick="sysTab('time')">Time</button>
-      <button data-s="relays" onclick="sysTab('relays')">Relays</button>
-      <button data-s="led" onclick="sysTab('led')">LED</button>
-      <button data-s="security" onclick="sysTab('security')">Security</button>
-      <button data-s="logs" onclick="sysTab('logs')">Logs</button>
-      <button data-s="console" onclick="sysTab('console')">Console</button>
-      <button data-s="device" onclick="sysTab('device')">Device</button>
-    </div>
-
-    <div class="syspane track" id="s-time">
-      <p class="note" id="syncnote">—</p>
-      <div class="field"><label>Time format</label><select id="fmt"><option value="0">12-hour (AM/PM)</option><option value="1">24-hour</option></select></div>
-      <div class="field"><label>Time zone</label>
-        <select id="tz">
-          <option value="IST-5:30">India — IST (UTC+5:30)</option>
-          <option value="GMT0">UTC / GMT</option>
-          <option value="GST-4">Gulf — GST (UTC+4)</option>
-          <option value="CET-1CEST,M3.5.0,M10.5.0/3">Central Europe</option>
-          <option value="GMT0BST,M3.5.0/1,M10.5.0">UK</option>
-          <option value="EST5EDT,M3.2.0,M11.1.0">US Eastern</option>
-          <option value="PST8PDT,M3.2.0,M11.1.0">US Pacific</option>
-          <option value="JST-9">Japan (UTC+9)</option>
-        </select></div>
-      <button class="btn" onclick="saveTime()">Apply</button>
-    </div>
-
-    <div class="syspane track" id="s-relays" style="display:none">
-      <p class="note">Each GPIO (0,1,3,10) maps to exactly one relay.</p>
-      <div id="maprows"></div><div class="err" id="maperr"></div>
-      <button class="btn" onclick="saveMap()">Save mapping</button>
-    </div>
-
-    <div class="syspane track" id="s-led" style="display:none">
-      <p class="note">The status LED shows boot/AP/connecting/online/error. In <b>Auto-off</b> it lights on changes then sleeps once steady online, so it isn't drawing power 24/7.</p>
-      <div class="field"><label>Behaviour</label>
-        <div class="seg" id="ledModeSeg">
-          <button data-m="off" onclick="setLedMode('off')">Off</button>
-          <button data-m="status" onclick="setLedMode('status')">Auto-off</button>
-          <button data-m="always" onclick="setLedMode('always')">Always</button>
-        </div></div>
-      <div class="field"><label>Brightness — <span id="ledBrightVal">40</span>/255</label>
-        <input id="ledBright" type="range" min="0" max="255" step="1" oninput="$('#ledBrightVal').textContent=this.value"></div>
-      <div class="field" id="ledTimeoutField"><label>Auto-off after (seconds, 0 = never)</label>
-        <input id="ledTimeout" type="number" min="0" max="3600" step="5"></div>
-      <div class="row2"><button class="btn" onclick="saveLed()">Save</button><button class="btn ghost" onclick="identify()">Identify (blink)</button></div>
-    </div>
-
-    <div class="syspane track" id="s-security" style="display:none">
-      <div class="field tg"><input type="checkbox" id="authon" style="width:auto" onchange="document.getElementById('authfields').style.display=this.checked?'block':'none'"><label style="margin:0">Require login (remembers known devices)</label></div>
-      <div id="authfields" style="display:none">
-        <div class="field"><label>Username</label><input id="au"></div>
-        <div class="field"><label>Password</label><input id="ap2" type="password" placeholder="set / change"></div>
-      </div>
-      <button class="btn ghost" onclick="saveAuth()">Save security</button>
-    </div>
-
-    <div class="syspane" id="s-logs" style="display:none">
-      <div class="logbox" id="logbox">—</div>
-      <div class="row2" style="margin-top:8px"><button class="btn ghost" onclick="loadLogs()">Refresh</button><button class="btn ghost" onclick="clearLogs()">Clear</button></div>
-    </div>
-
-    <div class="syspane" id="s-console" style="display:none">
-      <p class="note">Live mirror of the device's debug output (the same lines it prints over USB serial). Connects only while this tab is open.</p>
-      <div class="logbox" id="consoleBox" style="max-height:320px">—</div>
-      <div class="row2" style="margin-top:8px"><button class="btn ghost" onclick="clearConsole()">Clear</button><button class="btn ghost" onclick="connectConsole()">Reconnect</button></div>
-    </div>
-
-    <div class="syspane" id="s-device" style="display:none">
-      <div id="sysinfo"></div>
-      <button class="btn ghost" style="margin-top:14px" onclick="reboot()">Soft reboot</button>
-      <div class="field" style="margin-top:12px"><label>Type RESET to factory reset</label><input id="rstxt" placeholder="RESET"></div>
-      <button class="btn danger" onclick="doReset()">Factory reset</button>
-    </div>
-  </section>
-</div>
-
-<nav id="tabbar">
-  <button data-p="home" class="sel" onclick="nav('home')"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h14V10"/></svg>Home</button>
-  <button data-p="devices" onclick="nav('devices')"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7.5h.01M7 17h.01"/></svg>Devices</button>
-  <button data-p="energy" onclick="nav('energy')"><svg viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>Energy</button>
-  <button data-p="network" onclick="nav('network')"><svg viewBox="0 0 24 24"><path d="M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01"/></svg>Network</button>
-  <button data-p="system" onclick="nav('system')"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a8 8 0 000-6l1.5-2.6-2.8-2.8L15.5 4a8 8 0 00-7 0L5.9 2.5 3.1 5.3 4.6 9a8 8 0 000 6l-1.5 2.6 2.8 2.8L8.5 20a8 8 0 007 0l2.6 1.4 2.8-2.8z"/></svg>System</button>
-</nav>
-
-<script>
-const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
-let TOKEN=localStorage.getItem('leo_token')||'',last=null,page='home',sys='time',dirty=false,pendingNav=null,peerTimer=null;
-const SELF=location.origin;
-
-function H(){return TOKEN?{'X-Auth-Token':TOKEN}:{}}
-async function api(p,m='GET',b){const o={method:m,headers:{...H()}};if(b){o.headers['Content-Type']='application/json';o.body=JSON.stringify(b)}
-  const r=await fetch(p,o);if(r.status===401){$('#login').classList.add('show');throw new Error('auth')}return r}
-// retry wrapper: try/catch + N retries with backoff; returns Response or null
-async function apiR(p,m='GET',b,tries=2){for(let i=0;i<=tries;i++){try{const r=await api(p,m,b);if(r.ok||r.status===401)return r}catch(e){if(e.message==='auth')return null}await new Promise(z=>setTimeout(z,250*(i+1)))}return null}
-// safe JSON GET with retry; returns parsed object or null (never throws)
-async function jget(p,tries=2){const r=await apiR(p,'GET',null,tries);if(!r)return null;try{return await r.json()}catch(e){return null}}
-async function doLogin(){$('#lerr').textContent='';
-  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:$('#lu').value,pass:$('#lp').value})});
-  if(r.ok){TOKEN=(await r.json()).token;localStorage.setItem('leo_token',TOKEN);$('#login').classList.remove('show');connectWS()}
-  else $('#lerr').textContent=r.status===429?'Too many attempts — wait 30 s':'Wrong username or password'}
-
-/* ---- dirty-change guard ---- */
-document.addEventListener('input',e=>{if(e.target.closest('.track'))dirty=true});
-document.addEventListener('change',e=>{if(e.target.closest('.track'))dirty=true});
-function clearDirty(){dirty=false}
-function guard(go){if(dirty){pendingNav=go;$('#dirtyModal').classList.add('show')}else go()}
-function closeDirty(){$('#dirtyModal').classList.remove('show');pendingNav=null}
-function discardAndGo(){dirty=false;$('#dirtyModal').classList.remove('show');const g=pendingNav;pendingNav=null;if(g)g()}
-function goHome(){guard(()=>switchPage('home'))}
-
-/* ---- navigation ---- */
-function nav(p){guard(()=>switchPage(p))}
-function switchPage(p){
-  page=p;
-  $$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));
-  $$('#tabbar button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));
-  clearInterval(peerTimer);
-  disconnectConsole();
-  if(p==='energy')loadEnergy();
-  if(p==='network')loadNetwork();
-  if(p==='system')loadSystem();
-  if(p==='devices'){loadPeers();peerTimer=setInterval(loadPeers,5000)}
-  window.scrollTo(0,0);
-}
-function sysTab(s){sys=s;$$('#sysTabs button').forEach(b=>b.classList.toggle('sel',b.dataset.s===s));
-  $$('.syspane').forEach(p=>p.style.display=p.id==='s-'+s?'block':'none');
-  if(s==='relays')loadMap();if(s==='led')loadLed();if(s==='security')loadAuthCfg();if(s==='logs')loadLogs();if(s==='device')loadDeviceInfo();if(s==='time')loadTime();
-  if(s==='console')connectConsole();else disconnectConsole();
-}
-
-/* ---- live console (serial mirror) ---- */
-let consoleWs=null,consoleLines=[],consoleWant=false;
-function connectConsole(){
-  consoleWant=true;
-  if(consoleWs){consoleWs.onclose=null;consoleWs.close()}
-  $('#consoleBox').textContent='Connecting…';
-  consoleWs=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/console');
-  consoleWs.onopen=()=>{consoleLines=[];$('#consoleBox').textContent=''};
-  consoleWs.onmessage=e=>{
-    // history arrives as one newline-joined frame, live lines one per frame
-    consoleLines.push(...String(e.data).split('\n'));if(consoleLines.length>500)consoleLines.splice(0,consoleLines.length-500);
-    const box=$('#consoleBox');const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-24;
-    box.textContent=consoleLines.join('\n');if(atBottom)box.scrollTop=box.scrollHeight;
-  };
-  consoleWs.onclose=()=>{if(consoleWant)setTimeout(()=>{if(consoleWant)connectConsole()},2000)};
-}
-function disconnectConsole(){consoleWant=false;if(consoleWs){consoleWs.onclose=null;consoleWs.close();consoleWs=null}}
-function clearConsole(){consoleLines=[];$('#consoleBox').textContent=''}
-
-/* ---- live telemetry (this device) ---- */
-// Single telemetry socket. doLogin() calls connectWS() again; previously that
-// opened a second socket (each with its own reconnect chain) on every login.
-let telWs=null,telTimer=null;
-function connectWS(){clearTimeout(telTimer);
-  if(telWs){telWs.onclose=null;try{telWs.close()}catch(e){}}
-  const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');telWs=ws;
-  ws.onmessage=e=>{try{renderHome(JSON.parse(e.data))}catch(err){}};
-  ws.onclose=()=>{if(telWs===ws)telTimer=setTimeout(connectWS,1500)}}
-function fmtUp(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`}
-function esc(s){return(s+'').replace(/[<>&"']/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[m]))}
-// for values placed inside a JS string inside an onclick="..." attribute (e.g. an SSID with an apostrophe)
-function jsq(s){return esc((s+'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"))}
-
-function renderHome(d){
-  last=d;
-  $('#hname').textContent=d.name||'Smart Switch';
-  const t=(d.clock||'').split(' ');$('#clock').firstChild.nodeValue=t[0]||'--:--';
-  $('#ampm').textContent=(t[1]||'')+(d.synced?'':' ~');
-  $('#ipv').textContent=d.ip;
-  const cs=(d.conn||'AP').toLowerCase();$('#conn').className='pill '+cs;$('#connt').textContent=d.conn;
-  const rb=$('#roleBadge');if(d.role&&d.role!=='none'){rb.style.display='';rb.textContent=d.role.toUpperCase();rb.className='rolebadge '+d.role}else rb.style.display='none';
-  $('#temp').textContent=(d.temp??0).toFixed(1)+' °C';
-  $('#rssi').textContent=d.conn==='WIFI'?d.rssi+' dBm':'AP';
-  $('#uptime').textContent=fmtUp(d.uptime);
-  $('#statsdetail').innerHTML=[['Device ID',d.id],['Internal Temp',(d.temp??0).toFixed(1)+' °C'],['MAC',d.mac],['Loop',d.loopms+' ms'],
-    ['Heap (free/total)',d.heapFree+' / '+d.heapTotal+' KB'],['mDNS',d.mdns],['Storage',d.fsUsed+' / '+d.fsTotal+' KB'],
-    ['IP',d.ip],['SSID',d.ssid+(d.conn==='WIFI'?' ('+d.rssi+' dBm)':'')]].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('');
-  $('#relays').innerHTML=`<div class="card">`+d.relays.map((r,i)=>{
-    const on=r.on,onTime=on?`On ${Math.floor(r.onSecs/3600)?Math.floor(r.onSecs/3600)+'h ':''}${Math.floor(r.onSecs%3600/60)}m`:'Off';
-    return `<div class="relayrow"><div class="cmeta"><div class="cname">${esc(r.name)}</div>
-      <div class="cline">GPIO ${r.gpio} · ${onTime} · <span class="pw">≈ ${r.watts} W</span></div></div>
-      <button class="tgl ${on?'on':''}" onclick="toggle(${i},${!on},this)"></button></div>`}).join('')+`</div>`;
-}
-// optimistic, but revert if the device rejected/failed the request
-async function toggle(i,on,el){el.classList.toggle('on',on);let ok=false;try{ok=(await api('/api/relay','POST',{i,on})).ok}catch(e){}if(!ok)el.classList.toggle('on',!on)}
-async function setAll(on){try{await api('/api/all','POST',{on})}catch(e){}}
-
-/* ---- devices / cluster ---- */
-function getManual(){try{return JSON.parse(localStorage.getItem('leo_manual')||'[]')}catch(e){return[]}}
-function setManual(a){localStorage.setItem('leo_manual',JSON.stringify([...new Set(a)]))}
-function addManual(){let ip=($('#manualIp').value||'').trim().replace(/^https?:\/\//,'').replace(/\/.*$/,'');
-  if(!ip){return}setManual([...getManual(),ip]);$('#manualIp').value='';loadPeers()}
-function removeManual(ip){setManual(getManual().filter(x=>x!==ip));loadPeers()}
-
-async function loadPeers(){
-  let data={peers:[]};try{data=await(await api('/api/peers')).json()}catch(e){}
-  const discovered=data.peers||[];
-  const seenIp=new Set(discovered.map(p=>p.ip)), seenId=new Set(discovered.map(p=>p.id));
-  // resolve manually-added IPs (fallback when a router blocks broadcast)
-  const extra=[];
-  for(const ip of getManual()){
-    if(seenIp.has(ip))continue;
-    let idj=null;try{idj=await(await fetch(`http://${ip}/api/identity`,{headers:H()})).json()}catch(e){}
-    if(idj&&seenId.has(idj.id))continue;
-    extra.push(idj?{id:idj.id,name:idj.name,ip,port:80,role:idj.role,manual:true}
-                  :{id:'ip:'+ip,name:ip,ip,port:80,role:'',manual:true,offline:true});
-  }
-  const list=[...discovered,...extra];
-  $('#devCount').textContent=`Smart switches on your network (${list.length})`;
-  const selfRole=(list.find(p=>p.self)||{}).role||(last&&last.role)||'none';
-  $$('#roleSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.r===selfRole));
-  const box=$('#peers');
-  box.innerHTML=list.map(p=>{
-    const base=p.self?SELF:`http://${p.ip}:${p.port||80}`;
-    const role=p.role&&p.role!=='none'?`<span class="rolebadge ${p.role}">${p.role.toUpperCase()}</span>`:'';
-    const rm=p.manual?`<button class="linkbtn" style="max-width:44px;color:var(--bad)" onclick="removeManual('${jsq(p.ip)}')">✕</button>`:'';
-    return `<div class="devcard" data-base="${base}" data-id="${esc(p.id)}">
-      <div class="devhead"><span class="nm">${esc(p.name||p.id)}${p.self?'<span class="self">(this)</span>':''}${p.manual?'<span class="self">(manual)</span>':''}</span>${role}
-        <span class="dot" style="background:var(--muted)"></span></div>
-      <div class="devmeta">${esc(p.id)} · ${esc(p.ip)}</div>
-      <div class="minigrid" data-relays>${[0,1,2,3].map(i=>`<button class="minibtn" disabled>—</button>`).join('')}</div>
-      <div class="devactions">
-        <button class="linkbtn" onclick="peerAll('${base}',true,this)">All On</button>
-        <button class="linkbtn" onclick="peerAll('${base}',false,this)">All Off</button>
-        <a class="linkbtn" href="${base}" target="_blank" rel="noopener">Open</a>${rm}
-      </div></div>`}).join('')||'<p class="note">No switches found yet — add one by IP above if your router blocks broadcasts.</p>';
-  list.forEach(async p=>{
-    const base=p.self?SELF:`http://${p.ip}:${p.port||80}`;
-    const card=box.querySelector(`[data-id="${cssEsc(p.id)}"]`);if(!card)return;
-    let s;try{s=await(await fetch(base+'/api/state',{headers:H()})).json()}catch(e){card.querySelector('.dot').style.background='var(--bad)';return}
-    card.querySelector('.dot').style.background='var(--accent)';
-    const g=card.querySelector('[data-relays]');
-    g.innerHTML=s.relays.map((r,i)=>`<button class="minibtn ${r.on?'on':''}" title="${esc(r.name)}" onclick="peerToggle('${base}',${i},${!r.on},this)">${esc(r.name.slice(0,1).toUpperCase())+(i+1)}</button>`).join('');
-  });
-}
-function cssEsc(s){return(s+'').replace(/["\\]/g,'\\$&')}
-async function peerToggle(base,i,on,el){el.classList.toggle('on',on);try{await fetch(base+'/api/relay',{method:'POST',headers:{'Content-Type':'application/json',...H()},body:JSON.stringify({i,on})})}catch(e){}}
-async function peerAll(base,on,el){try{await fetch(base+'/api/all',{method:'POST',headers:{'Content-Type':'application/json',...H()},body:JSON.stringify({on})})}catch(e){}setTimeout(loadPeers,400)}
-async function setRole(r){$('#roleErr').textContent='';try{await api('/api/role','POST',{role:r});$$('#roleSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.r===r))}catch(e){$('#roleErr').textContent='Could not set role'}}
-
-/* ---- energy ---- */
-async function loadEnergy(){const d=await jget('/api/energy');if(!d)return;$('#tariff').value=d.tariff;
-  let k=0,c=0;d.days.forEach(x=>{k+=x.kwh;c+=x.cost});$('#e-kwh').textContent=k.toFixed(2);$('#e-cost').textContent='₹ '+c.toFixed(2);drawChart(d.days);clearDirty()}
-function drawChart(days){const cv=$('#chart');cv.width=Math.max(320,cv.clientWidth||500);cv.height=170;
-  const ct=cv.getContext('2d'),W=cv.width,Hh=cv.height,pad=22;ct.clearRect(0,0,W,Hh);
-  const vals=days.map(d=>d.kwh),max=Math.max(0.001,...vals);ct.strokeStyle='#26303a';ct.lineWidth=1;
-  for(let g=0;g<=3;g++){const y=pad+(Hh-2*pad)*g/3;ct.beginPath();ct.moveTo(pad,y);ct.lineTo(W-6,y);ct.stroke()}
-  if(!days.length){ct.fillStyle='#8aa0b2';ct.font='12px sans-serif';ct.fillText('No data yet',pad,Hh/2);return}
-  const n=days.length,x=i=>pad+(W-pad-6)*(n<2?.5:i/(n-1)),y=v=>Hh-pad-(Hh-2*pad)*(v/max);
-  const gr=ct.createLinearGradient(0,pad,0,Hh-pad);gr.addColorStop(0,'#34d3b055');gr.addColorStop(1,'#34d3b000');
-  ct.beginPath();ct.moveTo(x(0),Hh-pad);days.forEach((d,i)=>ct.lineTo(x(i),y(d.kwh)));ct.lineTo(x(n-1),Hh-pad);ct.closePath();ct.fillStyle=gr;ct.fill();
-  ct.beginPath();days.forEach((d,i)=>i?ct.lineTo(x(i),y(d.kwh)):ct.moveTo(x(i),y(d.kwh)));ct.strokeStyle='#34d3b0';ct.lineWidth=2;ct.stroke()}
-async function saveTariff(){await api('/api/tariff','POST',{tariff:parseFloat($('#tariff').value)||0});clearDirty();loadEnergy()}
-
-/* ---- network ---- */
-async function loadNetwork(){
-  const id=await jget('/api/identity');if(!id)return;
-  $('#devName').value=id.name||'';
-  $('#mdnsHost').value=(id.mdns||'').replace('.local','');
-  $('#ap-ssid').value=id.ap||'';     // AP name is the device's own AP, not the joined WiFi
-  const code=(id.id||'').replace('LEO-','');
-  let own = id.mdnsAuto ? (id.ownsCanonical
-        ? 'Automatic — this unit currently owns <b>leoswitch.local</b>'
-        : 'Automatic — <b>leoswitch.local</b> is held by another unit; this one answers to <b>'+esc(id.mdns)+'</b>')
-      : 'Manual override';
-  $('#idSummary').innerHTML=[['Device ID',id.id],['AP name',id.ap],['mDNS',id.mdns],['IP',id.ip||(last&&last.ip)||'—']]
-    .map(([k,v])=>`<div class="kv"><span>${k}</span><b>${esc(v||'—')}</b></div>`).join('')
-    +`<p class="note" style="margin:8px 0 0">${own}. Device ID and AP share tag <b>${esc(code)}</b>. Type <b>auto</b> to rejoin the leoswitch.local election.</p>`
-    +(id.apPassDefault?`<p class="note" style="margin:8px 0 0;color:var(--warn)">⚠ This device still uses the default AP password — set a new one below.</p>`:'');
-  if(last)$('#netcur').textContent=last.conn==='WIFI'?`Connected to ${last.ssid} (${last.rssi} dBm)`:`Not on WiFi — hosting AP ${id.ap}`;
-  clearDirty();
-}
-async function scan(){$('#netlist').innerHTML='<p class="note">Scanning…</p>';
-  const poll=async()=>{const r=await api('/api/scan');if(r.status===202){setTimeout(poll,1200);return}
-    const d=await r.json();$('#netlist').innerHTML=d.nets.sort((a,b)=>b.rssi-a.rssi).map(n=>`<div class="netitem" onclick="$('#sta-ssid').value='${jsq(n.ssid)}'"><b>${esc(n.ssid)}${n.ssid===d.connected?' ✓':''}</b><small>${n.lock?'🔒 ':''}${n.rssi} dBm</small></div>`).join('')||'<p class="note">Nothing found</p>'};poll()}
-function netMsg(t){$('#netlist').innerHTML=`<p class="note">${esc(t)}</p>`}
-async function saveSta(){const ssid=$('#sta-ssid').value.trim();if(!ssid){netMsg('Enter a network name first.');return}
-  let r=null;try{r=await api('/api/network','POST',{ssid,pass:$('#sta-pass').value})}catch(e){}
-  if(r&&r.ok){clearDirty();netMsg('Saved. Rebooting to join '+ssid+'…')}else netMsg('Could not save — try again.')}
-async function saveAp(){const pass=$('#ap-pass').value;if(pass&&pass.length<8){netMsg('AP password must be at least 8 characters.');return}
-  let r=null;try{r=await api('/api/ap','POST',{ssid:$('#ap-ssid').value.trim(),pass})}catch(e){}
-  if(r&&r.ok){clearDirty();netMsg('AP saved. Rebooting…')}else netMsg('Could not save AP settings.')}
-async function saveName(){await api('/api/devicename','POST',{name:$('#devName').value});clearDirty()}
-async function saveMdns(){const v=($('#mdnsHost').value||'').trim();
-  const r=await apiR('/api/mdns','POST',{mdns:v});if(!r){return}
-  let d={};try{d=await r.json()}catch(e){}
-  setTimeout(loadNetwork,400);   // reflect new ownership/effective host
-}
-
-/* ---- system: time ---- */
-async function loadTime(){const d=await jget('/api/timecfg');if(!d)return;$('#fmt').value=d.h24?'1':'0';$('#tz').value=d.tz;
-  $('#syncnote').textContent=d.synced?('Synced via NTP. Last drift: '+(d.drift||0).toFixed(0)+' s'):'Running on internal clock — NTP not yet reached.';clearDirty()}
-async function saveTime(){await api('/api/time','POST',{tz:$('#tz').value,h24:$('#fmt').value==='1'});clearDirty()}
-
-/* ---- system: relay map ---- */
-let MAP=[],POOL=[];
-async function loadMap(){const d=await jget('/api/relaymap');if(!d)return;MAP=d.relays;POOL=d.pool;$('#maperr').textContent='';
-  $('#maprows').innerHTML=MAP.map((r,i)=>`<div class="cardbox"><div class="field" style="margin-bottom:9px"><label>Name</label><input value="${esc(r.name)}" oninput="MAP[${i}].name=this.value"></div>
-    <div class="row2"><div class="field" style="margin:0"><label>GPIO</label><select onchange="MAP[${i}].gpio=+this.value">${POOL.map(g=>`<option value="${g}" ${g===r.gpio?'selected':''}>GPIO ${g}</option>`).join('')}</select></div>
-    <div class="field" style="margin:0"><label>Wattage</label><input type="number" value="${r.watts}" oninput="MAP[${i}].watts=+this.value"></div></div></div>`).join('');clearDirty()}
-async function saveMap(){const seen={};if(MAP.some(r=>seen[r.gpio]?true:(seen[r.gpio]=1,false))){$('#maperr').textContent='Each GPIO maps to one relay only.';return}
-  let r=null;try{r=await api('/api/relaymap/set','POST',{relays:MAP})}catch(e){}
-  $('#maperr').textContent=r&&r.ok?'Saved.':'Save failed.';if(r&&r.ok)clearDirty()}
-
-/* ---- system: security ---- */
-async function loadAuthCfg(){const a=await jget('/api/authcfg');if(!a)return;$('#authon').checked=a.enabled;$('#authfields').style.display=a.enabled?'block':'none';$('#au').value=a.user||'';clearDirty()}
-async function saveAuth(){const enabled=$('#authon').checked,user=$('#au').value.trim(),pass=$('#ap2').value;
-  if(enabled&&!user){alert('Enter a username to enable login.');return}
-  let r=null;try{r=await api('/api/auth','POST',{enabled,user,pass})}catch(e){return}
-  if(!r.ok){alert(r.status===400?'Set a username and password before enabling login.':'Could not save security settings.');return}
-  try{const d=await r.json();if(d.token){TOKEN=d.token;localStorage.setItem('leo_token',TOKEN)}}catch(e){}
-  $('#ap2').value='';clearDirty()}
-
-/* ---- status LED ---- */
-async function loadLed(){const d=await jget('/api/led');if(!d)return;
-  $$('#ledModeSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.m===d.mode));
-  $('#ledBright').value=d.brightness;$('#ledBrightVal').textContent=d.brightness;
-  $('#ledTimeout').value=d.timeout;
-  $('#ledTimeoutField').style.display=d.mode==='status'?'block':'none';clearDirty()}
-function setLedMode(m){$$('#ledModeSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.m===m));
-  $('#ledTimeoutField').style.display=m==='status'?'block':'none';dirty=true}
-async function saveLed(){const mode=($('#ledModeSeg button.sel')||{}).dataset?.m||'status';
-  const r=await apiR('/api/led','POST',{mode,brightness:+$('#ledBright').value,timeout:+$('#ledTimeout').value});
-  if(r)clearDirty()}
-async function identify(){await apiR('/api/led/identify','POST',{})}
-
-/* ---- system: logs / device ---- */
-async function loadLogs(){try{const d=await(await api('/api/logs')).json();$('#logbox').textContent=d.logs.length?d.logs.map(l=>`[${l.lvl}] ${l.s?new Date(l.t*1000).toLocaleString():'(uptime)'}  ${l.msg}`).reverse().join('\n'):'No log entries.'}catch(e){}}
-async function clearLogs(){await api('/api/logs/clear','POST');loadLogs()}
-function loadDeviceInfo(){if(!last)return;$('#sysinfo').innerHTML=[['Device ID',last.id],['Name',last.name],['Model',last.model],['Firmware',last.version],
-  ['Role',last.role],['mDNS',last.mdns],['IP',last.ip],['MAC',last.mac],['Storage',last.fsUsed+' / '+last.fsTotal+' KB']].map(([k,v])=>`<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}
-async function reboot(){if(confirm('Soft reboot now? Relays switch off.'))await api('/api/reboot','POST')}
-async function doReset(){if($('#rstxt').value!=='RESET'){alert('Type RESET to confirm.');return}await api('/api/reset','POST',{confirm:'RESET'})}
-
-function loadSystem(){sysTab(sys)}
-connectWS();
-setInterval(()=>{if(last&&page==='home')renderHome(last)},1000);
-</script>
-</body>
-</html>
-)LEOHTML";
+// Web UI as plain C string lines (one per HTML line; \" and \\ are escapes).
+static const char INDEX_HTML[] PROGMEM =
+  "<!DOCTYPE html>\n"
+  "<html lang=\"en\">\n"
+  "<head>\n"
+  "<meta charset=\"utf-8\">\n"
+  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">\n"
+  "<title>LEO Smart Switch</title>\n"
+  "<!-- web app: installable from the browser menu (\"Add to Home screen\" / \"Install app\") -->\n"
+  "<link rel=\"manifest\" href=\"/manifest.json\">\n"
+  "<link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">\n"
+  "<link rel=\"apple-touch-icon\" href=\"/icon.svg\">\n"
+  "<meta name=\"theme-color\" content=\"#0c0f12\">\n"
+  "<meta name=\"mobile-web-app-capable\" content=\"yes\">\n"
+  "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">\n"
+  "<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\">\n"
+  "<meta name=\"apple-mobile-web-app-title\" content=\"LEO\">\n"
+  "<style>\n"
+  ":root{\n"
+  "  --bg:#0c0f12;--surface:#14191e;--surface2:#1b222a;--line:#26303a;\n"
+  "  --txt:#e7edf2;--muted:#8aa0b2;--accent:#34d3b0;--on:#34d3b0;--off:#3a4651;\n"
+  "  --warn:#f0a93b;--bad:#e2564b;--good:#46c46a;--pwr:#f0a93b;--navh:62px;--r:14px}\n"
+  "*{box-sizing:border-box}\n"
+  "body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#13202022,transparent),var(--bg);\n"
+  "  color:var(--txt);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;\n"
+  "  -webkit-tap-highlight-color:transparent}\n"
+  "button{font:inherit;color:inherit;cursor:pointer}\n"
+  ".wrap{max-width:560px;margin:0 auto;padding:14px 14px calc(var(--navh) + 24px)}\n"
+  "@media(min-width:760px){.wrap{max-width:1000px;padding:22px 24px calc(var(--navh) + 28px)}}\n"
+  "@media(min-width:1200px){.wrap{max-width:1140px}}\n"
+  "\n"
+  "/* header */\n"
+  "header{display:flex;align-items:center;gap:11px;padding:2px 2px 0}\n"
+  ".logo{width:40px;height:40px;border-radius:11px;flex:0 0 auto;background:linear-gradient(150deg,#1d2730,#10161b);\n"
+  "  border:1px solid var(--line);display:grid;place-items:center;cursor:pointer}\n"
+  ".logo svg{width:22px;height:22px}\n"
+  ".htitle{flex:1;min-width:0;cursor:pointer}\n"
+  ".htitle h1{margin:0;font-size:16px;font-weight:650;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n"
+  ".sub{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--muted);margin-top:1px}\n"
+  ".pill{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:20px;background:var(--surface2);\n"
+  "  border:1px solid var(--line);font-weight:600;font-size:10.5px;letter-spacing:.4px}\n"
+  ".dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}\n"
+  ".pill.wifi .dot{background:var(--good)}.pill.ap .dot{background:var(--accent)}\n"
+  ".pill.reconnecting .dot{background:var(--warn);animation:bl 1s infinite}\n"
+  ".rolebadge{font-size:9.5px;font-weight:700;letter-spacing:.5px;padding:2px 7px;border-radius:20px;border:1px solid var(--line)}\n"
+  ".rolebadge.master{color:var(--accent);border-color:#2a4a44}.rolebadge.slave{color:var(--muted)}\n"
+  "@keyframes bl{50%{opacity:.25}}\n"
+  "\n"
+  ".clockrow{display:flex;justify-content:space-between;align-items:baseline;margin:12px 2px 10px}\n"
+  ".clock{font-size:30px;font-weight:300;letter-spacing:1px;font-variant-numeric:tabular-nums}\n"
+  "@media(min-width:760px){.clock{font-size:38px}}\n"
+  ".clock small{font-size:13px;color:var(--muted);margin-left:6px}\n"
+  ".ipv{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}\n"
+  "\n"
+  ".statsbar{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);margin-bottom:14px;overflow:hidden}\n"
+  ".statshead{display:flex;gap:14px;align-items:center;padding:11px 14px;cursor:pointer}\n"
+  ".statshead .s{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}\n"
+  ".statshead .s b{color:var(--txt);font-weight:600}\n"
+  ".statshead .chev{margin-left:auto;transition:.15s;stroke:var(--muted);width:16px;height:16px}\n"
+  ".statsbar.open .chev{transform:rotate(180deg)}\n"
+  ".statsdetail{display:none;border-top:1px solid var(--line);padding:6px 14px 12px}\n"
+  ".statsbar.open .statsdetail{display:block}\n"
+  ".kv{display:flex;justify-content:space-between;padding:5px 0;font-size:12.5px;border-bottom:1px dashed #1e2731}\n"
+  ".kv:last-child{border:0}.kv span{color:var(--muted)}.kv b{font-weight:600;font-variant-numeric:tabular-nums}\n"
+  "\n"
+  ".master{display:flex;gap:10px;margin-bottom:14px}\n"
+  ".master button{flex:1;padding:13px;border-radius:var(--r);border:1px solid var(--line);background:var(--surface);\n"
+  "  font-weight:650;letter-spacing:.3px;transition:.15s}\n"
+  ".master .allon{color:var(--on)}.master .alloff{color:var(--muted)}\n"
+  ".master button:active{transform:scale(.98)}\n"
+  "\n"
+  "#peers{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:11px}\n"
+  "#relays{display:block}\n"
+  ".card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:13px 14px}\n"
+  ".card.on{border-color:#2a4a44;background:linear-gradient(180deg,#16201d,var(--surface))}\n"
+  ".relayrow{display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:1px dashed #1e2731}\n"
+  ".relayrow:last-child{border:0}\n"
+  ".cmeta{flex:1;min-width:0}\n"
+  ".cname{font-size:14px;font-weight:600}\n"
+  ".cline{font-size:11px;color:var(--muted);margin-top:2px;font-variant-numeric:tabular-nums}\n"
+  ".cline .pw{color:var(--pwr)}\n"
+  ".tgl{width:58px;height:32px;border-radius:20px;border:1px solid var(--line);background:var(--off);position:relative;flex:0 0 auto;transition:.15s}\n"
+  ".tgl:after{content:\"\";position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#cfd8df;transition:.15s}\n"
+  ".tgl.on{background:var(--on)}.tgl.on:after{left:29px;background:#06231e}\n"
+  "\n"
+  "/* device (peer) cards */\n"
+  ".devcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px}\n"
+  ".devhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}\n"
+  ".devhead .nm{flex:1;min-width:0;font-size:15px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n"
+  ".devhead .self{font-size:10px;color:var(--accent);margin-left:6px}\n"
+  ".devmeta{font-size:11.5px;color:var(--muted);margin-bottom:10px;font-variant-numeric:tabular-nums}\n"
+  ".minigrid{display:flex;gap:6px}\n"
+  ".minibtn{flex:1;height:38px;border-radius:9px;border:1px solid var(--line);background:var(--off);color:var(--txt);font-weight:700;font-size:11px}\n"
+  ".minibtn.on{background:var(--on);color:#06231e;border-color:#2a4a44}\n"
+  ".devactions{display:flex;gap:8px;margin-top:10px}\n"
+  ".linkbtn{flex:1;padding:9px;border-radius:9px;border:1px solid var(--line);background:transparent;color:var(--txt);font-size:12px;text-align:center;text-decoration:none}\n"
+  "\n"
+  "h3{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:18px 0 10px}\n"
+  ".page>h3:first-child{margin-top:4px}\n"
+  ".field{margin-bottom:13px}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}\n"
+  "input,select{width:100%;padding:10px 11px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--txt);font:inherit}\n"
+  ".cardbox{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:14px}\n"
+  ".btn{width:100%;padding:11px;border-radius:11px;border:1px solid var(--accent);background:var(--accent);color:#06231e;font-weight:700;margin-top:4px}\n"
+  ".btn.ghost{background:transparent;color:var(--txt);border-color:var(--line)}\n"
+  ".btn.danger{background:transparent;color:var(--bad);border-color:#5a2a26}\n"
+  ".row2{display:flex;gap:8px}.row2>*{flex:1}\n"
+  ".note{font-size:11.5px;color:var(--muted);margin:8px 0}\n"
+  ".seg{display:flex;gap:6px}\n"
+  ".seg button{flex:1;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--muted);font-weight:600;font-size:12px}\n"
+  ".seg button.sel{background:var(--accent);color:#06231e;border-color:var(--accent)}\n"
+  ".netitem{display:flex;justify-content:space-between;align-items:center;padding:9px 11px;border:1px solid var(--line);border-radius:10px;margin-bottom:7px;background:var(--surface);cursor:pointer}\n"
+  "canvas{width:100%;height:170px;display:block;background:var(--surface);border:1px solid var(--line);border-radius:11px}\n"
+  ".energytot{display:flex;gap:10px;margin:12px 0}\n"
+  ".energytot div{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:11px;text-align:center}\n"
+  ".energytot b{display:block;font-size:20px;font-weight:600;margin-top:2px}\n"
+  ".logbox{background:#0a0d10;border:1px solid var(--line);border-radius:11px;padding:10px;font:11px ui-monospace,monospace;color:#a9b7c2;max-height:240px;overflow:auto;white-space:pre-wrap}\n"
+  ".subtabs{display:flex;gap:6px;overflow-x:auto;margin-bottom:14px}\n"
+  ".subtabs button{white-space:nowrap;padding:7px 11px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--muted);font-size:12px;font-weight:600}\n"
+  ".subtabs button.sel{color:#06231e;background:var(--accent);border-color:var(--accent)}\n"
+  ".page{display:none}.page.active{display:block}\n"
+  ".tg{display:flex;align-items:center;gap:9px;font-size:13px}\n"
+  ".err{color:var(--bad);font-size:12px;min-height:16px}\n"
+  "\n"
+  "/* footer nav */\n"
+  "nav{position:fixed;left:0;right:0;bottom:0;height:var(--navh);background:#0e1318ee;backdrop-filter:blur(8px);\n"
+  "  border-top:1px solid var(--line);display:flex;z-index:20;padding-bottom:env(safe-area-inset-bottom)}\n"
+  "nav button{flex:1;background:none;border:0;display:flex;flex-direction:column;align-items:center;justify-content:center;\n"
+  "  gap:3px;color:var(--muted);font-size:10px;font-weight:600}\n"
+  "nav button svg{width:21px;height:21px;stroke:var(--muted);fill:none;stroke-width:1.7}\n"
+  "nav button.sel{color:var(--accent)}nav button.sel svg{stroke:var(--accent)}\n"
+  "@media(min-width:760px){nav{max-width:560px;left:50%;transform:translateX(-50%);border-radius:16px 16px 0 0;border:1px solid var(--line);border-bottom:0}}\n"
+  "\n"
+  "/* modals / login */\n"
+  ".modal{position:fixed;inset:0;background:#000a;backdrop-filter:blur(2px);display:none;place-items:center;z-index:40;padding:24px}\n"
+  ".modal.show{display:grid}\n"
+  ".modalbox{width:min(360px,100%);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;text-align:center}\n"
+  ".modalbox h2{margin:0 0 8px;font-size:17px}\n"
+  ".modalbox p{color:var(--muted);font-size:13px;margin:0 0 16px}\n"
+  ".login{position:fixed;inset:0;background:var(--bg);display:none;place-items:center;z-index:50;padding:24px}\n"
+  ".login.show{display:grid}\n"
+  "/* live power hero (home) */\n"
+  ".powerhero{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;background:linear-gradient(160deg,#152421,var(--surface));\n"
+  "  border:1px solid #23413b;border-radius:var(--r);padding:14px 16px;margin-bottom:14px}\n"
+  ".powerhero .w{font-size:34px;font-weight:300;letter-spacing:.5px;font-variant-numeric:tabular-nums;line-height:1}\n"
+  ".powerhero .w small{font-size:14px;color:var(--muted);margin-left:4px}\n"
+  ".powerhero .c{text-align:right;font-size:12px;color:var(--muted)}\n"
+  ".powerhero .c b{display:block;color:var(--accent);font-size:15px;font-weight:650}\n"
+  ".devhead .watts{font-size:12px;font-weight:650;color:var(--pwr);font-variant-numeric:tabular-nums}\n"
+  ".devcard.offline{opacity:.6}\n"
+  ".devcard .lockbtn{display:none}.devcard.locked .lockbtn{display:block}\n"
+  ".devcard.locked .minigrid{display:none}\n"
+  "</style>\n"
+  "</head>\n"
+  "<body>\n"
+  "\n"
+  "<!-- login overlay -->\n"
+  "<div class=\"login\" id=\"login\"><div style=\"width:min(340px,100%);text-align:center\">\n"
+  "  <div class=\"logo\" style=\"margin:0 auto 14px;width:54px;height:54px\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#34d3b0\" stroke-width=\"1.7\"><path d=\"M9 18h6M10 21h4M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z\"/></svg></div>\n"
+  "  <h2 style=\"margin:0 0 4px\">Sign in</h2>\n"
+  "  <p class=\"note\" id=\"ltarget\" style=\"margin:0 0 14px\">to this device</p>\n"
+  "  <div class=\"field\"><input id=\"lu\" placeholder=\"Username\"></div>\n"
+  "  <div class=\"field\"><input id=\"lp\" type=\"password\" placeholder=\"Password\"></div>\n"
+  "  <button class=\"btn\" onclick=\"doLogin()\">Sign in</button>\n"
+  "  <button class=\"btn ghost\" id=\"lcancel\" style=\"display:none\" onclick=\"cancelLogin()\">Cancel</button>\n"
+  "  <div class=\"err\" id=\"lerr\"></div>\n"
+  "</div></div>\n"
+  "\n"
+  "<!-- unsaved-changes guard -->\n"
+  "<div class=\"modal\" id=\"dirtyModal\"><div class=\"modalbox\">\n"
+  "  <h2>Unsaved changes</h2>\n"
+  "  <p>You were editing settings. Finish saving first, or discard your changes?</p>\n"
+  "  <button class=\"btn ghost\" onclick=\"closeDirty()\">Continue setup</button>\n"
+  "  <button class=\"btn danger\" style=\"margin-top:8px\" onclick=\"discardAndGo()\">Discard &amp; leave</button>\n"
+  "</div></div>\n"
+  "\n"
+  "<div class=\"wrap\">\n"
+  "  <header>\n"
+  "    <div class=\"logo\" onclick=\"goHome()\"><svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#34d3b0\" stroke-width=\"1.6\"><path d=\"M9 18h6M10 21h4M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z\"/></svg></div>\n"
+  "    <div class=\"htitle\" onclick=\"goHome()\">\n"
+  "      <h1 id=\"hname\">Smart Switch</h1>\n"
+  "      <div class=\"sub\">\n"
+  "        <span class=\"pill\" id=\"conn\"><span class=\"dot\"></span><span id=\"connt\">…</span></span>\n"
+  "        <span class=\"rolebadge\" id=\"roleBadge\" style=\"display:none\"></span>\n"
+  "      </div>\n"
+  "    </div>\n"
+  "  </header>\n"
+  "\n"
+  "  <!-- HOME -->\n"
+  "  <section class=\"page active\" id=\"p-home\">\n"
+  "    <div class=\"clockrow\"><div class=\"clock\" id=\"clock\">--:--<small id=\"ampm\"></small></div><div class=\"ipv\" id=\"ipv\">—</div></div>\n"
+  "    <div class=\"statsbar\" id=\"statsbar\">\n"
+  "      <div class=\"statshead\" onclick=\"document.getElementById('statsbar').classList.toggle('open')\">\n"
+  "        <div class=\"s\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#f0a93b\" stroke-width=\"1.8\"><path d=\"M14 4v6l5 9H5l5-9V4M9 4h6\"/></svg><b id=\"temp\">—</b></div>\n"
+  "        <div class=\"s\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#46c46a\" stroke-width=\"1.8\"><path d=\"M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01\"/></svg><b id=\"rssi\">—</b></div>\n"
+  "        <div class=\"s\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#8aa0b2\" stroke-width=\"1.8\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v5l3 2\"/></svg><b id=\"uptime\">—</b></div>\n"
+  "        <svg class=\"chev\" viewBox=\"0 0 24 24\" fill=\"none\" stroke-width=\"2\"><path d=\"M6 9l6 6 6-6\"/></svg>\n"
+  "      </div>\n"
+  "      <div class=\"statsdetail\" id=\"statsdetail\"></div>\n"
+  "    </div>\n"
+  "    <div class=\"powerhero\"><div class=\"w\" id=\"pwrNow\">0<small>W</small></div>\n"
+  "      <div class=\"c\">Running cost<b id=\"pwrCost\">₹ 0.00 /hr</b></div></div>\n"
+  "    <div class=\"master\"><button class=\"allon\" onclick=\"setAll(true)\">All On</button><button class=\"alloff\" onclick=\"setAll(false)\">All Off</button></div>\n"
+  "    <div id=\"relays\"></div>\n"
+  "  </section>\n"
+  "\n"
+  "  <!-- DEVICES -->\n"
+  "  <section class=\"page\" id=\"p-devices\">\n"
+  "    <h3>This device</h3>\n"
+  "    <div class=\"cardbox\">\n"
+  "      <div class=\"field\" style=\"margin:0\"><label>Role — who is in charge of the group</label>\n"
+  "        <div class=\"seg\" id=\"roleSeg\">\n"
+  "          <button data-r=\"none\" onclick=\"setRole('none')\">None</button>\n"
+  "          <button data-r=\"master\" onclick=\"setRole('master')\">Master</button>\n"
+  "          <button data-r=\"slave\" onclick=\"setRole('slave')\">Slave</button>\n"
+  "        </div></div>\n"
+  "      <div class=\"err\" id=\"roleErr\"></div>\n"
+  "    </div>\n"
+  "    <h3 id=\"devCount\">Smart switches on your network</h3>\n"
+  "    <div class=\"master\"><button class=\"allon\" onclick=\"everyAll(true)\">Everything On</button><button class=\"alloff\" onclick=\"everyAll(false)\">Everything Off</button></div>\n"
+  "    <p class=\"note\" id=\"devTotal\" style=\"margin-top:-6px\">—</p>\n"
+  "    <p class=\"note\">Detected by a stable device ID broadcast on the LAN — independent of mDNS. Controlling any one here reaches them all.</p>\n"
+  "    <div class=\"row2\" style=\"margin-bottom:12px\">\n"
+  "      <input id=\"manualIp\" placeholder=\"Add a device by IP (e.g. 192.168.1.50)\">\n"
+  "      <button class=\"btn\" style=\"margin:0;max-width:120px\" onclick=\"addManual()\">Add</button>\n"
+  "    </div>\n"
+  "    <div id=\"peers\"></div>\n"
+  "  </section>\n"
+  "\n"
+  "  <!-- ENERGY -->\n"
+  "  <section class=\"page\" id=\"p-energy\">\n"
+  "    <h3>Last 30 days</h3>\n"
+  "    <canvas id=\"chart\" width=\"500\" height=\"170\"></canvas>\n"
+  "    <div class=\"energytot\"><div>kWh (30d)<b id=\"e-kwh\">—</b></div><div>Cost (30d)<b id=\"e-cost\">—</b></div></div>\n"
+  "    <div class=\"cardbox track\">\n"
+  "      <div class=\"field\" style=\"margin:0\"><label>Tariff (₹ / kWh)</label><input id=\"tariff\" type=\"number\" step=\"0.01\"></div>\n"
+  "    </div>\n"
+  "    <button class=\"btn\" onclick=\"saveTariff()\">Save tariff</button>\n"
+  "    <p class=\"note\">Estimated from wattage × on-time, not metered.</p>\n"
+  "  </section>\n"
+  "\n"
+  "  <!-- NETWORK -->\n"
+  "  <section class=\"page\" id=\"p-network\">\n"
+  "    <h3>Identity</h3>\n"
+  "    <div class=\"cardbox\" id=\"idSummary\" style=\"font-variant-numeric:tabular-nums\"></div>\n"
+  "    <div class=\"cardbox track\">\n"
+  "      <div class=\"field\"><label>Device name</label><input id=\"devName\" placeholder=\"e.g. Living Room Switch\"></div>\n"
+  "      <button class=\"btn ghost\" onclick=\"saveName()\">Save name</button>\n"
+  "      <div class=\"field\" style=\"margin-top:14px\"><label>mDNS hostname (recovery address, no spaces)</label>\n"
+  "        <div class=\"row2\"><input id=\"mdnsHost\" placeholder=\"leoswitch\"><button class=\"btn\" style=\"margin:0;max-width:120px\" onclick=\"saveMdns()\">Apply</button></div></div>\n"
+  "      <p class=\"note\" id=\"mdnsNote\">Default is automatic: one unit owns <b>leoswitch.local</b> (the master, or the lowest-ID device, with automatic failover) and the rest use <b>leo-&lt;id&gt;.local</b>. Set a fixed name here to pin this unit, or type <b>auto</b> to hand it back to the election. Detection itself never depends on mDNS.</p>\n"
+  "    </div>\n"
+  "\n"
+  "    <h3>Connection</h3>\n"
+  "    <p class=\"note\" id=\"netcur\">—</p>\n"
+  "    <button class=\"btn ghost\" onclick=\"scan()\">Scan for networks</button>\n"
+  "    <div id=\"netlist\" style=\"margin-top:10px\"></div>\n"
+  "    <div class=\"cardbox track\" style=\"margin-top:12px\">\n"
+  "      <div class=\"field\"><label>Join WiFi — SSID</label><input id=\"sta-ssid\"></div>\n"
+  "      <div class=\"field\"><label>Password</label><input id=\"sta-pass\" type=\"password\"></div>\n"
+  "      <button class=\"btn\" onclick=\"saveSta()\">Save &amp; reconnect</button>\n"
+  "    </div>\n"
+  "\n"
+  "    <h3>Access Point</h3>\n"
+  "    <div class=\"cardbox track\">\n"
+  "      <div class=\"field\"><label>AP name</label><input id=\"ap-ssid\"></div>\n"
+  "      <div class=\"field\"><label>AP password (min 8)</label><input id=\"ap-pass\" type=\"password\" placeholder=\"leave blank to keep\"></div>\n"
+  "      <button class=\"btn ghost\" onclick=\"saveAp()\">Save AP &amp; reboot</button>\n"
+  "    </div>\n"
+  "  </section>\n"
+  "\n"
+  "  <!-- SYSTEM -->\n"
+  "  <section class=\"page\" id=\"p-system\">\n"
+  "    <div class=\"subtabs\" id=\"sysTabs\">\n"
+  "      <button data-s=\"time\" class=\"sel\" onclick=\"sysTab('time')\">Time</button>\n"
+  "      <button data-s=\"relays\" onclick=\"sysTab('relays')\">Relays</button>\n"
+  "      <button data-s=\"led\" onclick=\"sysTab('led')\">LED</button>\n"
+  "      <button data-s=\"security\" onclick=\"sysTab('security')\">Security</button>\n"
+  "      <button data-s=\"logs\" onclick=\"sysTab('logs')\">Logs</button>\n"
+  "      <button data-s=\"console\" onclick=\"sysTab('console')\">Console</button>\n"
+  "      <button data-s=\"device\" onclick=\"sysTab('device')\">Device</button>\n"
+  "    </div>\n"
+  "\n"
+  "    <div class=\"syspane track\" id=\"s-time\">\n"
+  "      <p class=\"note\" id=\"syncnote\">—</p>\n"
+  "      <div class=\"field\"><label>Time format</label><select id=\"fmt\"><option value=\"0\">12-hour (AM/PM)</option><option value=\"1\">24-hour</option></select></div>\n"
+  "      <div class=\"field\"><label>Time zone</label>\n"
+  "        <select id=\"tz\">\n"
+  "          <option value=\"IST-5:30\">India — IST (UTC+5:30)</option>\n"
+  "          <option value=\"GMT0\">UTC / GMT</option>\n"
+  "          <option value=\"GST-4\">Gulf — GST (UTC+4)</option>\n"
+  "          <option value=\"CET-1CEST,M3.5.0,M10.5.0/3\">Central Europe</option>\n"
+  "          <option value=\"GMT0BST,M3.5.0/1,M10.5.0\">UK</option>\n"
+  "          <option value=\"EST5EDT,M3.2.0,M11.1.0\">US Eastern</option>\n"
+  "          <option value=\"PST8PDT,M3.2.0,M11.1.0\">US Pacific</option>\n"
+  "          <option value=\"JST-9\">Japan (UTC+9)</option>\n"
+  "        </select></div>\n"
+  "      <button class=\"btn\" onclick=\"saveTime()\">Apply</button>\n"
+  "    </div>\n"
+  "\n"
+  "    <div class=\"syspane track\" id=\"s-relays\" style=\"display:none\">\n"
+  "      <p class=\"note\">Each GPIO (0,1,3,10) maps to exactly one relay.</p>\n"
+  "      <div id=\"maprows\"></div><div class=\"err\" id=\"maperr\"></div>\n"
+  "      <button class=\"btn\" onclick=\"saveMap()\">Save mapping</button>\n"
+  "    </div>\n"
+  "\n"
+  "    <div class=\"syspane track\" id=\"s-led\" style=\"display:none\">\n"
+  "      <p class=\"note\">The status LED shows boot/AP/connecting/online/error. In <b>Auto-off</b> it lights on changes then sleeps once steady online, so it isn't drawing power 24/7.</p>\n"
+  "      <div class=\"field\"><label>Behaviour</label>\n"
+  "        <div class=\"seg\" id=\"ledModeSeg\">\n"
+  "          <button data-m=\"off\" onclick=\"setLedMode('off')\">Off</button>\n"
+  "          <button data-m=\"status\" onclick=\"setLedMode('status')\">Auto-off</button>\n"
+  "          <button data-m=\"always\" onclick=\"setLedMode('always')\">Always</button>\n"
+  "        </div></div>\n"
+  "      <div class=\"field\"><label>Brightness — <span id=\"ledBrightVal\">40</span>/255</label>\n"
+  "        <input id=\"ledBright\" type=\"range\" min=\"0\" max=\"255\" step=\"1\" oninput=\"$('#ledBrightVal').textContent=this.value\"></div>\n"
+  "      <div class=\"field\" id=\"ledTimeoutField\"><label>Auto-off after (seconds, 0 = never)</label>\n"
+  "        <input id=\"ledTimeout\" type=\"number\" min=\"0\" max=\"3600\" step=\"5\"></div>\n"
+  "      <div class=\"row2\"><button class=\"btn\" onclick=\"saveLed()\">Save</button><button class=\"btn ghost\" onclick=\"identify()\">Identify (blink)</button></div>\n"
+  "    </div>\n"
+  "\n"
+  "    <div class=\"syspane track\" id=\"s-security\" style=\"display:none\">\n"
+  "      <div class=\"field tg\"><input type=\"checkbox\" id=\"authon\" style=\"width:auto\" onchange=\"document.getElementById('authfields').style.display=this.checked?'block':'none'\"><label style=\"margin:0\">Require login (remembers known devices)</label></div>\n"
+  "      <div id=\"authfields\" style=\"display:none\">\n"
+  "        <div class=\"field\"><label>Username</label><input id=\"au\"></div>\n"
+  "        <div class=\"field\"><label>Password</label><input id=\"ap2\" type=\"password\" placeholder=\"set / change\"></div>\n"
+  "      </div>\n"
+  "      <button class=\"btn ghost\" onclick=\"saveAuth()\">Save security</button>\n"
+  "    </div>\n"
+  "\n"
+  "    <div class=\"syspane\" id=\"s-logs\" style=\"display:none\">\n"
+  "      <div class=\"logbox\" id=\"logbox\">—</div>\n"
+  "      <div class=\"row2\" style=\"margin-top:8px\"><button class=\"btn ghost\" onclick=\"loadLogs()\">Refresh</button><button class=\"btn ghost\" onclick=\"clearLogs()\">Clear</button></div>\n"
+  "    </div>\n"
+  "\n"
+  "    <div class=\"syspane\" id=\"s-console\" style=\"display:none\">\n"
+  "      <p class=\"note\">Live mirror of the device's debug output (the same lines it prints over USB serial). Connects only while this tab is open.</p>\n"
+  "      <div class=\"logbox\" id=\"consoleBox\" style=\"max-height:320px\">—</div>\n"
+  "      <div class=\"row2\" style=\"margin-top:8px\"><button class=\"btn ghost\" onclick=\"clearConsole()\">Clear</button><button class=\"btn ghost\" onclick=\"connectConsole()\">Reconnect</button></div>\n"
+  "    </div>\n"
+  "\n"
+  "    <div class=\"syspane\" id=\"s-device\" style=\"display:none\">\n"
+  "      <div id=\"sysinfo\"></div>\n"
+  "      <div class=\"cardbox\" style=\"margin-top:14px\">\n"
+  "        <div class=\"field\" style=\"margin:0\"><label>Update firmware (OTA) — choose the compiled .bin</label>\n"
+  "          <input id=\"otafile\" type=\"file\" accept=\".bin,application/octet-stream\"></div>\n"
+  "        <button class=\"btn\" id=\"otabtn\" onclick=\"doOta()\">Upload &amp; install</button>\n"
+  "        <p class=\"note\" id=\"otamsg\">Relays switch off and the device restarts when the update finishes. Your settings are kept.</p>\n"
+  "      </div>\n"
+  "      <button class=\"btn ghost\" style=\"margin-top:14px\" onclick=\"reboot()\">Soft reboot</button>\n"
+  "      <div class=\"field\" style=\"margin-top:12px\"><label>Type RESET to factory reset</label><input id=\"rstxt\" placeholder=\"RESET\"></div>\n"
+  "      <button class=\"btn danger\" onclick=\"doReset()\">Factory reset</button>\n"
+  "    </div>\n"
+  "  </section>\n"
+  "</div>\n"
+  "\n"
+  "<nav id=\"tabbar\">\n"
+  "  <button data-p=\"home\" class=\"sel\" onclick=\"nav('home')\"><svg viewBox=\"0 0 24 24\"><path d=\"M3 11l9-8 9 8M5 10v10h14V10\"/></svg>Home</button>\n"
+  "  <button data-p=\"devices\" onclick=\"nav('devices')\"><svg viewBox=\"0 0 24 24\"><rect x=\"3\" y=\"4\" width=\"18\" height=\"7\" rx=\"2\"/><rect x=\"3\" y=\"14\" width=\"18\" height=\"6\" rx=\"2\"/><path d=\"M7 7.5h.01M7 17h.01\"/></svg>Devices</button>\n"
+  "  <button data-p=\"energy\" onclick=\"nav('energy')\"><svg viewBox=\"0 0 24 24\"><path d=\"M13 2L4 14h6l-1 8 9-12h-6z\"/></svg>Energy</button>\n"
+  "  <button data-p=\"network\" onclick=\"nav('network')\"><svg viewBox=\"0 0 24 24\"><path d=\"M2 9a15 15 0 0120 0M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0M12 19.5h.01\"/></svg>Network</button>\n"
+  "  <button data-p=\"system\" onclick=\"nav('system')\"><svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M19.4 15a8 8 0 000-6l1.5-2.6-2.8-2.8L15.5 4a8 8 0 00-7 0L5.9 2.5 3.1 5.3 4.6 9a8 8 0 000 6l-1.5 2.6 2.8 2.8L8.5 20a8 8 0 007 0l2.6 1.4 2.8-2.8z\"/></svg>System</button>\n"
+  "</nav>\n"
+  "\n"
+  "<script>\n"
+  "const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);\n"
+  "let TOKEN=localStorage.getItem('leo_token')||'',last=null,page='home',sys='time',dirty=false,pendingNav=null,peerTimer=null;\n"
+  "const SELF=location.origin;\n"
+  "\n"
+  "function H(){return TOKEN?{'X-Auth-Token':TOKEN}:{}}\n"
+  "async function api(p,m='GET',b){const o={method:m,headers:{...H()}};if(b){o.headers['Content-Type']='application/json';o.body=JSON.stringify(b)}\n"
+  "  const r=await fetch(p,o);if(r.status===401){askLogin(null);throw new Error('auth')}return r}\n"
+  "// retry wrapper: try/catch + N retries with backoff; returns Response or null\n"
+  "async function apiR(p,m='GET',b,tries=2){for(let i=0;i<=tries;i++){try{const r=await api(p,m,b);if(r.ok||r.status===401)return r}catch(e){if(e.message==='auth')return null}await new Promise(z=>setTimeout(z,250*(i+1)))}return null}\n"
+  "// safe JSON GET with retry; returns parsed object or null (never throws)\n"
+  "async function jget(p,tries=2){const r=await apiR(p,'GET',null,tries);if(!r)return null;try{return await r.json()}catch(e){return null}}\n"
+  "/* ---- per-device tokens (each switch can have its own login) ---- */\n"
+  "function peerTokens(){try{return JSON.parse(localStorage.getItem('leo_peer_tokens')||'{}')}catch(e){return{}}}\n"
+  "function peerH(base){if(base===SELF)return H();const t=peerTokens()[base];return t?{'X-Auth-Token':t}:{}}\n"
+  "let loginBase=null;   // null = this device; otherwise a peer's base URL\n"
+  "function askLogin(base,label){loginBase=base;$('#ltarget').textContent=base?'to '+label:'to this device';\n"
+  "  $('#lcancel').style.display=base?'block':'none';$('#lerr').textContent='';$('#login').classList.add('show')}\n"
+  "function cancelLogin(){$('#login').classList.remove('show');loginBase=null}\n"
+  "async function doLogin(){$('#lerr').textContent='';const base=loginBase;\n"
+  "  let r;try{r=await fetch((base||'')+'/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:$('#lu').value,pass:$('#lp').value})})}\n"
+  "  catch(e){$('#lerr').textContent='Device not reachable';return}\n"
+  "  if(r.ok){const t=(await r.json()).token;$('#lp').value='';\n"
+  "    if(base){const m=peerTokens();m[base]=t;LOCKED.delete(base);localStorage.setItem('leo_peer_tokens',JSON.stringify(m));cancelLogin();loadPeers()}\n"
+  "    else{TOKEN=t;localStorage.setItem('leo_token',TOKEN);$('#login').classList.remove('show');connectWS()}}\n"
+  "  else $('#lerr').textContent=r.status===429?'Too many attempts — wait 30 s':'Wrong username or password'}\n"
+  "\n"
+  "/* ---- dirty-change guard ---- */\n"
+  "document.addEventListener('input',e=>{if(e.target.closest('.track'))dirty=true});\n"
+  "document.addEventListener('change',e=>{if(e.target.closest('.track'))dirty=true});\n"
+  "function clearDirty(){dirty=false}\n"
+  "function guard(go){if(dirty){pendingNav=go;$('#dirtyModal').classList.add('show')}else go()}\n"
+  "function closeDirty(){$('#dirtyModal').classList.remove('show');pendingNav=null}\n"
+  "function discardAndGo(){dirty=false;$('#dirtyModal').classList.remove('show');const g=pendingNav;pendingNav=null;if(g)g()}\n"
+  "function goHome(){guard(()=>switchPage('home'))}\n"
+  "\n"
+  "/* ---- navigation ---- */\n"
+  "function nav(p){guard(()=>switchPage(p))}\n"
+  "function switchPage(p){\n"
+  "  page=p;\n"
+  "  $$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
+  "  $$('#tabbar button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));\n"
+  "  clearInterval(peerTimer);\n"
+  "  disconnectConsole();\n"
+  "  if(p==='energy')loadEnergy();\n"
+  "  if(p==='network')loadNetwork();\n"
+  "  if(p==='system')loadSystem();\n"
+  "  if(p==='devices'){loadPeers();peerTimer=setInterval(loadPeers,5000)}\n"
+  "  window.scrollTo(0,0);\n"
+  "}\n"
+  "function sysTab(s){sys=s;$$('#sysTabs button').forEach(b=>b.classList.toggle('sel',b.dataset.s===s));\n"
+  "  $$('.syspane').forEach(p=>p.style.display=p.id==='s-'+s?'block':'none');\n"
+  "  if(s==='relays')loadMap();if(s==='led')loadLed();if(s==='security')loadAuthCfg();if(s==='logs')loadLogs();if(s==='device')loadDeviceInfo();if(s==='time')loadTime();\n"
+  "  if(s==='console')connectConsole();else disconnectConsole();\n"
+  "}\n"
+  "\n"
+  "/* ---- live console (serial mirror) ---- */\n"
+  "let consoleWs=null,consoleLines=[],consoleWant=false;\n"
+  "function connectConsole(){\n"
+  "  consoleWant=true;\n"
+  "  if(consoleWs){consoleWs.onclose=null;consoleWs.close()}\n"
+  "  $('#consoleBox').textContent='Connecting…';\n"
+  "  consoleWs=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/console');\n"
+  "  consoleWs.onopen=()=>{consoleLines=[];$('#consoleBox').textContent=''};\n"
+  "  consoleWs.onmessage=e=>{\n"
+  "    // history arrives as one newline-joined frame, live lines one per frame\n"
+  "    consoleLines.push(...String(e.data).split('\\n'));if(consoleLines.length>500)consoleLines.splice(0,consoleLines.length-500);\n"
+  "    const box=$('#consoleBox');const atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-24;\n"
+  "    box.textContent=consoleLines.join('\\n');if(atBottom)box.scrollTop=box.scrollHeight;\n"
+  "  };\n"
+  "  consoleWs.onclose=()=>{if(consoleWant)setTimeout(()=>{if(consoleWant)connectConsole()},2000)};\n"
+  "}\n"
+  "function disconnectConsole(){consoleWant=false;if(consoleWs){consoleWs.onclose=null;consoleWs.close();consoleWs=null}}\n"
+  "function clearConsole(){consoleLines=[];$('#consoleBox').textContent=''}\n"
+  "\n"
+  "/* ---- live telemetry (this device) ---- */\n"
+  "// Single telemetry socket. doLogin() calls connectWS() again; previously that\n"
+  "// opened a second socket (each with its own reconnect chain) on every login.\n"
+  "let telWs=null,telTimer=null;\n"
+  "function connectWS(){clearTimeout(telTimer);\n"
+  "  if(telWs){telWs.onclose=null;try{telWs.close()}catch(e){}}\n"
+  "  const ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');telWs=ws;\n"
+  "  ws.onmessage=e=>{try{renderHome(JSON.parse(e.data))}catch(err){}};\n"
+  "  ws.onclose=()=>{if(telWs===ws)telTimer=setTimeout(connectWS,1500)}}\n"
+  "function fmtUp(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}d ${h}h`:h?`${h}h ${m}m`:`${m}m`}\n"
+  "function esc(s){return(s+'').replace(/[<>&\"']/g,m=>({'<':'&lt;','>':'&gt;','&':'&amp;','\"':'&quot;',\"'\":'&#39;'}[m]))}\n"
+  "// for values placed inside a JS string inside an onclick=\"...\" attribute (e.g. an SSID with an apostrophe)\n"
+  "function jsq(s){return esc((s+'').replace(/\\\\/g,'\\\\\\\\').replace(/'/g,\"\\\\'\"))}\n"
+  "\n"
+  "function renderHome(d){\n"
+  "  last=d;\n"
+  "  $('#hname').textContent=d.name||'Smart Switch';\n"
+  "  const t=(d.clock||'').split(' ');$('#clock').firstChild.nodeValue=t[0]||'--:--';\n"
+  "  $('#ampm').textContent=(t[1]||'')+(d.synced?'':' ~');\n"
+  "  $('#ipv').textContent=d.ip;\n"
+  "  const cs=(d.conn||'AP').toLowerCase();$('#conn').className='pill '+cs;$('#connt').textContent=d.conn;\n"
+  "  const rb=$('#roleBadge');if(d.role&&d.role!=='none'){rb.style.display='';rb.textContent=d.role.toUpperCase();rb.className='rolebadge '+d.role}else rb.style.display='none';\n"
+  "  const w=+d.total_watts||0;\n"
+  "  $('#pwrNow').innerHTML=(w>=100?w.toFixed(0):w.toFixed(1))+'<small>W</small>';\n"
+  "  $('#pwrCost').textContent='₹ '+(w/1000*(+d.tariff||0)).toFixed(2)+' /hr';\n"
+  "  $('#temp').textContent=(d.temp?\?0).toFixed(1)+' °C';\n"
+  "  $('#rssi').textContent=d.conn==='WIFI'?d.rssi+' dBm':'AP';\n"
+  "  $('#uptime').textContent=fmtUp(d.uptime);\n"
+  "  $('#statsdetail').innerHTML=[['Device ID',d.id],['Internal Temp',(d.temp?\?0).toFixed(1)+' °C'],['MAC',d.mac],['Loop',d.loopms+' ms'],\n"
+  "    ['Heap (free/total)',d.heapFree+' / '+d.heapTotal+' KB'],['mDNS',d.mdns],['Storage',d.fsUsed+' / '+d.fsTotal+' KB'],\n"
+  "    ['IP',d.ip],['SSID',d.ssid+(d.conn==='WIFI'?' ('+d.rssi+' dBm)':'')]].map(([k,v])=>`<div class=\"kv\"><span>${k}</span><b>${esc(v)}</b></div>`).join('');\n"
+  "  $('#relays').innerHTML=`<div class=\"card\">`+d.relays.map((r,i)=>{\n"
+  "    const on=r.on,onTime=on?`On ${Math.floor(r.onSecs/3600)?Math.floor(r.onSecs/3600)+'h ':''}${Math.floor(r.onSecs%3600/60)}m`:'Off';\n"
+  "    return `<div class=\"relayrow\"><div class=\"cmeta\"><div class=\"cname\">${esc(r.name)}</div>\n"
+  "      <div class=\"cline\">GPIO ${r.gpio} · ${onTime} · <span class=\"pw\">≈ ${r.watts} W</span></div></div>\n"
+  "      <button class=\"tgl ${on?'on':''}\" onclick=\"toggle(${i},${!on},this)\"></button></div>`}).join('')+`</div>`;\n"
+  "}\n"
+  "// optimistic, but revert if the device rejected/failed the request\n"
+  "async function toggle(i,on,el){el.classList.toggle('on',on);let ok=false;try{ok=(await api('/api/relay','POST',{i,on})).ok}catch(e){}if(!ok)el.classList.toggle('on',!on)}\n"
+  "async function setAll(on){try{await api('/api/all','POST',{on})}catch(e){}}\n"
+  "\n"
+  "/* ---- devices / cluster ---- */\n"
+  "function getManual(){try{return JSON.parse(localStorage.getItem('leo_manual')||'[]')}catch(e){return[]}}\n"
+  "function setManual(a){localStorage.setItem('leo_manual',JSON.stringify([...new Set(a)]))}\n"
+  "function addManual(){let ip=($('#manualIp').value||'').trim().replace(/^https?:\\/\\//,'').replace(/\\/.*$/,'');\n"
+  "  if(!ip){return}setManual([...getManual(),ip]);$('#manualIp').value='';loadPeers()}\n"
+  "function removeManual(ip){setManual(getManual().filter(x=>x!==ip));loadPeers()}\n"
+  "\n"
+  "async function loadPeers(){\n"
+  "  let data={peers:[]};try{data=await(await api('/api/peers')).json()}catch(e){}\n"
+  "  const discovered=data.peers||[];\n"
+  "  const seenIp=new Set(discovered.map(p=>p.ip)), seenId=new Set(discovered.map(p=>p.id));\n"
+  "  // resolve manually-added IPs (fallback when a router blocks broadcast)\n"
+  "  const extra=[];\n"
+  "  for(const ip of getManual()){\n"
+  "    if(seenIp.has(ip))continue;\n"
+  "    let idj=null;try{idj=await(await fetch(`http://${ip}/api/identity`,{headers:peerH(`http://${ip}:80`)})).json()}catch(e){}\n"
+  "    if(idj&&seenId.has(idj.id))continue;\n"
+  "    extra.push(idj?{id:idj.id,name:idj.name,ip,port:80,role:idj.role,manual:true}\n"
+  "                  :{id:'ip:'+ip,name:ip,ip,port:80,role:'',manual:true,offline:true});\n"
+  "  }\n"
+  "  const list=[...discovered,...extra];\n"
+  "  $('#devCount').textContent=`Smart switches on your network (${list.length})`;\n"
+  "  const selfRole=(list.find(p=>p.self)||{}).role||(last&&last.role)||'none';\n"
+  "  $$('#roleSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.r===selfRole));\n"
+  "  const box=$('#peers');\n"
+  "  box.innerHTML=list.map(p=>{\n"
+  "    const base=p.self?SELF:`http://${p.ip}:${p.port||80}`;\n"
+  "    const role=p.role&&p.role!=='none'?`<span class=\"rolebadge ${p.role}\">${p.role.toUpperCase()}</span>`:'';\n"
+  "    const rm=p.manual?`<button class=\"linkbtn\" style=\"max-width:44px;color:var(--bad)\" onclick=\"removeManual('${jsq(p.ip)}')\">✕</button>`:'';\n"
+  "    return `<div class=\"devcard${LOCKED.has(base)?' locked':''}\" data-base=\"${base}\" data-id=\"${esc(p.id)}\">\n"
+  "      <div class=\"devhead\"><span class=\"nm\">${esc(p.name||p.id)}${p.self?'<span class=\"self\">(this)</span>':''}${p.manual?'<span class=\"self\">(manual)</span>':''}</span>${role}\n"
+  "        <span class=\"watts\"></span><span class=\"dot\" style=\"background:var(--muted)\"></span></div>\n"
+  "      <div class=\"devmeta\">${esc(p.id)} · ${esc(p.ip)}</div>\n"
+  "      <div class=\"minigrid\" data-relays>${[0,1,2,3].map(i=>`<button class=\"minibtn\" disabled>—</button>`).join('')}</div>\n"
+  "      <button class=\"btn ghost lockbtn\" onclick=\"askLogin('${jsq(base)}','${jsq(p.name||p.id)}')\">🔒 Sign in to control</button>\n"
+  "      <div class=\"devactions\">\n"
+  "        <button class=\"linkbtn\" onclick=\"peerAll('${base}',true,this)\">All On</button>\n"
+  "        <button class=\"linkbtn\" onclick=\"peerAll('${base}',false,this)\">All Off</button>\n"
+  "        <a class=\"linkbtn\" href=\"${base}\" target=\"_blank\" rel=\"noopener\">Open</a>${rm}\n"
+  "      </div></div>`}).join('')||'<p class=\"note\">No switches found yet — add one by IP above if your router blocks broadcasts.</p>';\n"
+  "  PEER_BASES=list.map(p=>p.self?SELF:`http://${p.ip}:${p.port||80}`);\n"
+  "  let totW=0,online=0;\n"
+  "  await Promise.all(list.map(async p=>{\n"
+  "    const base=p.self?SELF:`http://${p.ip}:${p.port||80}`;\n"
+  "    const card=box.querySelector(`[data-id=\"${cssEsc(p.id)}\"]`);if(!card)return;\n"
+  "    let s;try{s=await(await fetch(base+'/api/state',{headers:peerH(base)})).json()}\n"
+  "    catch(e){card.classList.add('offline');card.querySelector('.dot').style.background='var(--bad)';return}\n"
+  "    online++;totW+=+s.total_watts||0;\n"
+  "    card.querySelector('.dot').style.background='var(--accent)';\n"
+  "    card.querySelector('.watts').textContent=(+s.total_watts||0).toFixed(0)+' W';\n"
+  "    const g=card.querySelector('[data-relays]');\n"
+  "    g.innerHTML=s.relays.map((r,i)=>`<button class=\"minibtn ${r.on?'on':''}\" title=\"${esc(r.name)}\" onclick=\"peerToggle('${jsq(base)}',${i},${!r.on},this)\">${esc(r.name.slice(0,1).toUpperCase())+(i+1)}</button>`).join('');\n"
+  "  }));\n"
+  "  $('#devTotal').textContent=`${online} of ${list.length} online · ${totW.toFixed(0)} W total right now`;\n"
+  "}\n"
+  "let PEER_BASES=[];const LOCKED=new Set();\n"
+  "function cssEsc(s){return(s+'').replace(/[\"\\\\]/g,'\\\\$&')}\n"
+  "// POST to any switch with that switch's own token. A 401 marks the card\n"
+  "// \"locked\" and offers a sign-in for that device (per-device logins).\n"
+  "async function peerPost(base,path,body){\n"
+  "  let r;try{r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json',...peerH(base)},body:JSON.stringify(body)})}catch(e){return false}\n"
+  "  if(r.status===401){if(base===SELF)askLogin(null);else{LOCKED.add(base);const c=[...$$('.devcard')].find(x=>x.dataset.base===base);if(c)c.classList.add('locked')}return false}\n"
+  "  return r.ok}\n"
+  "async function peerToggle(base,i,on,el){el.classList.toggle('on',on);if(!await peerPost(base,'/api/relay',{i,on}))el.classList.toggle('on',!on);setTimeout(loadPeers,400)}\n"
+  "async function peerAll(base,on,el){await peerPost(base,'/api/all',{on});setTimeout(loadPeers,400)}\n"
+  "async function everyAll(on){if(!PEER_BASES.length)await loadPeers();\n"
+  "  const res=await Promise.all(PEER_BASES.map(b=>peerPost(b,'/api/all',{on})));\n"
+  "  const bad=res.filter(x=>!x).length;$('#devTotal').textContent=bad?`${bad} device(s) didn't respond`:'Done';setTimeout(loadPeers,500)}\n"
+  "async function setRole(r){$('#roleErr').textContent='';try{await api('/api/role','POST',{role:r});$$('#roleSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.r===r))}catch(e){$('#roleErr').textContent='Could not set role'}}\n"
+  "\n"
+  "/* ---- energy ---- */\n"
+  "async function loadEnergy(){const d=await jget('/api/energy');if(!d)return;$('#tariff').value=d.tariff;\n"
+  "  let k=0,c=0;d.days.forEach(x=>{k+=x.kwh;c+=x.cost});$('#e-kwh').textContent=k.toFixed(2);$('#e-cost').textContent='₹ '+c.toFixed(2);drawChart(d.days);clearDirty()}\n"
+  "function drawChart(days){const cv=$('#chart');cv.width=Math.max(320,cv.clientWidth||500);cv.height=170;\n"
+  "  const ct=cv.getContext('2d'),W=cv.width,Hh=cv.height,pad=22;ct.clearRect(0,0,W,Hh);\n"
+  "  const vals=days.map(d=>d.kwh),max=Math.max(0.001,...vals);ct.strokeStyle='#26303a';ct.lineWidth=1;\n"
+  "  for(let g=0;g<=3;g++){const y=pad+(Hh-2*pad)*g/3;ct.beginPath();ct.moveTo(pad,y);ct.lineTo(W-6,y);ct.stroke()}\n"
+  "  if(!days.length){ct.fillStyle='#8aa0b2';ct.font='12px sans-serif';ct.fillText('No data yet',pad,Hh/2);return}\n"
+  "  const n=days.length,x=i=>pad+(W-pad-6)*(n<2?.5:i/(n-1)),y=v=>Hh-pad-(Hh-2*pad)*(v/max);\n"
+  "  const gr=ct.createLinearGradient(0,pad,0,Hh-pad);gr.addColorStop(0,'#34d3b055');gr.addColorStop(1,'#34d3b000');\n"
+  "  ct.beginPath();ct.moveTo(x(0),Hh-pad);days.forEach((d,i)=>ct.lineTo(x(i),y(d.kwh)));ct.lineTo(x(n-1),Hh-pad);ct.closePath();ct.fillStyle=gr;ct.fill();\n"
+  "  ct.beginPath();days.forEach((d,i)=>i?ct.lineTo(x(i),y(d.kwh)):ct.moveTo(x(i),y(d.kwh)));ct.strokeStyle='#34d3b0';ct.lineWidth=2;ct.stroke()}\n"
+  "async function saveTariff(){await api('/api/tariff','POST',{tariff:parseFloat($('#tariff').value)||0});clearDirty();loadEnergy()}\n"
+  "\n"
+  "/* ---- network ---- */\n"
+  "async function loadNetwork(){\n"
+  "  const id=await jget('/api/identity');if(!id)return;\n"
+  "  $('#devName').value=id.name||'';\n"
+  "  $('#mdnsHost').value=(id.mdns||'').replace('.local','');\n"
+  "  $('#ap-ssid').value=id.ap||'';     // AP name is the device's own AP, not the joined WiFi\n"
+  "  const code=(id.id||'').replace('LEO-','');\n"
+  "  let own = id.mdnsAuto ? (id.ownsCanonical\n"
+  "        ? 'Automatic — this unit currently owns <b>leoswitch.local</b>'\n"
+  "        : 'Automatic — <b>leoswitch.local</b> is held by another unit; this one answers to <b>'+esc(id.mdns)+'</b>')\n"
+  "      : 'Manual override';\n"
+  "  $('#idSummary').innerHTML=[['Device ID',id.id],['AP name',id.ap],['mDNS',id.mdns],['IP',id.ip||(last&&last.ip)||'—']]\n"
+  "    .map(([k,v])=>`<div class=\"kv\"><span>${k}</span><b>${esc(v||'—')}</b></div>`).join('')\n"
+  "    +`<p class=\"note\" style=\"margin:8px 0 0\">${own}. Device ID and AP share tag <b>${esc(code)}</b>. Type <b>auto</b> to rejoin the leoswitch.local election.</p>`\n"
+  "    +(id.apPassDefault?`<p class=\"note\" style=\"margin:8px 0 0;color:var(--warn)\">⚠ This device still uses the default AP password — set a new one below.</p>`:'');\n"
+  "  if(last)$('#netcur').textContent=last.conn==='WIFI'?`Connected to ${last.ssid} (${last.rssi} dBm)`:`Not on WiFi — hosting AP ${id.ap}`;\n"
+  "  clearDirty();\n"
+  "}\n"
+  "async function scan(){$('#netlist').innerHTML='<p class=\"note\">Scanning…</p>';\n"
+  "  const poll=async()=>{const r=await api('/api/scan');if(r.status===202){setTimeout(poll,1200);return}\n"
+  "    const d=await r.json();$('#netlist').innerHTML=d.nets.sort((a,b)=>b.rssi-a.rssi).map(n=>`<div class=\"netitem\" onclick=\"$('#sta-ssid').value='${jsq(n.ssid)}'\"><b>${esc(n.ssid)}${n.ssid===d.connected?' ✓':''}</b><small>${n.lock?'🔒 ':''}${n.rssi} dBm</small></div>`).join('')||'<p class=\"note\">Nothing found</p>'};poll()}\n"
+  "function netMsg(t){$('#netlist').innerHTML=`<p class=\"note\">${esc(t)}</p>`}\n"
+  "async function saveSta(){const ssid=$('#sta-ssid').value.trim();if(!ssid){netMsg('Enter a network name first.');return}\n"
+  "  let r=null;try{r=await api('/api/network','POST',{ssid,pass:$('#sta-pass').value})}catch(e){}\n"
+  "  if(r&&r.ok){clearDirty();netMsg('Saved. Rebooting to join '+ssid+'…')}else netMsg('Could not save — try again.')}\n"
+  "async function saveAp(){const pass=$('#ap-pass').value;if(pass&&pass.length<8){netMsg('AP password must be at least 8 characters.');return}\n"
+  "  let r=null;try{r=await api('/api/ap','POST',{ssid:$('#ap-ssid').value.trim(),pass})}catch(e){}\n"
+  "  if(r&&r.ok){clearDirty();netMsg('AP saved. Rebooting…')}else netMsg('Could not save AP settings.')}\n"
+  "async function saveName(){await api('/api/devicename','POST',{name:$('#devName').value});clearDirty()}\n"
+  "async function saveMdns(){const v=($('#mdnsHost').value||'').trim();\n"
+  "  const r=await apiR('/api/mdns','POST',{mdns:v});if(!r){return}\n"
+  "  let d={};try{d=await r.json()}catch(e){}\n"
+  "  setTimeout(loadNetwork,400);   // reflect new ownership/effective host\n"
+  "}\n"
+  "\n"
+  "/* ---- system: time ---- */\n"
+  "async function loadTime(){const d=await jget('/api/timecfg');if(!d)return;$('#fmt').value=d.h24?'1':'0';$('#tz').value=d.tz;\n"
+  "  $('#syncnote').textContent=d.synced?('Synced via NTP. Last drift: '+(d.drift||0).toFixed(0)+' s'):'Running on internal clock — NTP not yet reached.';clearDirty()}\n"
+  "async function saveTime(){await api('/api/time','POST',{tz:$('#tz').value,h24:$('#fmt').value==='1'});clearDirty()}\n"
+  "\n"
+  "/* ---- system: relay map ---- */\n"
+  "let MAP=[],POOL=[];\n"
+  "async function loadMap(){const d=await jget('/api/relaymap');if(!d)return;MAP=d.relays;POOL=d.pool;$('#maperr').textContent='';\n"
+  "  $('#maprows').innerHTML=MAP.map((r,i)=>`<div class=\"cardbox\"><div class=\"field\" style=\"margin-bottom:9px\"><label>Name</label><input value=\"${esc(r.name)}\" oninput=\"MAP[${i}].name=this.value\"></div>\n"
+  "    <div class=\"row2\"><div class=\"field\" style=\"margin:0\"><label>GPIO</label><select onchange=\"MAP[${i}].gpio=+this.value\">${POOL.map(g=>`<option value=\"${g}\" ${g===r.gpio?'selected':''}>GPIO ${g}</option>`).join('')}</select></div>\n"
+  "    <div class=\"field\" style=\"margin:0\"><label>Wattage</label><input type=\"number\" value=\"${r.watts}\" oninput=\"MAP[${i}].watts=+this.value\"></div></div></div>`).join('');clearDirty()}\n"
+  "async function saveMap(){const seen={};if(MAP.some(r=>seen[r.gpio]?true:(seen[r.gpio]=1,false))){$('#maperr').textContent='Each GPIO maps to one relay only.';return}\n"
+  "  let r=null;try{r=await api('/api/relaymap/set','POST',{relays:MAP})}catch(e){}\n"
+  "  $('#maperr').textContent=r&&r.ok?'Saved.':'Save failed.';if(r&&r.ok)clearDirty()}\n"
+  "\n"
+  "/* ---- system: security ---- */\n"
+  "async function loadAuthCfg(){const a=await jget('/api/authcfg');if(!a)return;$('#authon').checked=a.enabled;$('#authfields').style.display=a.enabled?'block':'none';$('#au').value=a.user||'';clearDirty()}\n"
+  "async function saveAuth(){const enabled=$('#authon').checked,user=$('#au').value.trim(),pass=$('#ap2').value;\n"
+  "  if(enabled&&!user){alert('Enter a username to enable login.');return}\n"
+  "  let r=null;try{r=await api('/api/auth','POST',{enabled,user,pass})}catch(e){return}\n"
+  "  if(!r.ok){alert(r.status===400?'Set a username and password before enabling login.':'Could not save security settings.');return}\n"
+  "  try{const d=await r.json();if(d.token){TOKEN=d.token;localStorage.setItem('leo_token',TOKEN)}}catch(e){}\n"
+  "  $('#ap2').value='';clearDirty()}\n"
+  "\n"
+  "/* ---- status LED ---- */\n"
+  "async function loadLed(){const d=await jget('/api/led');if(!d)return;\n"
+  "  $$('#ledModeSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.m===d.mode));\n"
+  "  $('#ledBright').value=d.brightness;$('#ledBrightVal').textContent=d.brightness;\n"
+  "  $('#ledTimeout').value=d.timeout;\n"
+  "  $('#ledTimeoutField').style.display=d.mode==='status'?'block':'none';clearDirty()}\n"
+  "function setLedMode(m){$$('#ledModeSeg button').forEach(b=>b.classList.toggle('sel',b.dataset.m===m));\n"
+  "  $('#ledTimeoutField').style.display=m==='status'?'block':'none';dirty=true}\n"
+  "async function saveLed(){const mode=($('#ledModeSeg button.sel')||{}).dataset?.m||'status';\n"
+  "  const r=await apiR('/api/led','POST',{mode,brightness:+$('#ledBright').value,timeout:+$('#ledTimeout').value});\n"
+  "  if(r)clearDirty()}\n"
+  "async function identify(){await apiR('/api/led/identify','POST',{})}\n"
+  "\n"
+  "/* ---- system: logs / device ---- */\n"
+  "async function loadLogs(){try{const d=await(await api('/api/logs')).json();$('#logbox').textContent=d.logs.length?d.logs.map(l=>`[${l.lvl}] ${l.s?new Date(l.t*1000).toLocaleString():'(uptime)'}  ${l.msg}`).reverse().join('\\n'):'No log entries.'}catch(e){}}\n"
+  "async function clearLogs(){await api('/api/logs/clear','POST');loadLogs()}\n"
+  "function loadDeviceInfo(){if(!last)return;$('#sysinfo').innerHTML=[['Device ID',last.id],['Name',last.name],['Model',last.model],['Firmware',last.version],\n"
+  "  ['Role',last.role],['mDNS',last.mdns],['IP',last.ip],['MAC',last.mac],['Storage',last.fsUsed+' / '+last.fsTotal+' KB']].map(([k,v])=>`<div class=\"kv\"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}\n"
+  "async function reboot(){if(confirm('Soft reboot now? Relays switch off.'))await api('/api/reboot','POST')}\n"
+  "/* ---- OTA firmware update (XHR so we get upload progress) ---- */\n"
+  "function doOta(){const f=$('#otafile').files[0],msg=$('#otamsg'),btn=$('#otabtn');\n"
+  "  if(!f){msg.textContent='Choose a .bin file first.';return}\n"
+  "  if(!/\\.bin$/i.test(f.name)){msg.textContent='That is not a .bin firmware file.';return}\n"
+  "  if(!confirm('Install '+f.name+' ('+(f.size/1024).toFixed(0)+' KB)? Relays will switch off while the device restarts.'))return;\n"
+  "  const fd=new FormData();fd.append('firmware',f,f.name);\n"
+  "  const x=new XMLHttpRequest();x.open('POST','/api/ota');if(TOKEN)x.setRequestHeader('X-Auth-Token',TOKEN);\n"
+  "  btn.disabled=true;\n"
+  "  x.upload.onprogress=e=>{if(e.lengthComputable)msg.textContent='Uploading… '+Math.round(e.loaded*100/e.total)+'%'};\n"
+  "  x.onload=()=>{btn.disabled=false;\n"
+  "    if(x.status===200){msg.textContent='Installed. Restarting — this page reconnects by itself in ~15 s.';setTimeout(()=>location.reload(),15000)}\n"
+  "    else if(x.status===401){msg.textContent='Sign in first.';askLogin(null)}\n"
+  "    else{let e='';try{e=JSON.parse(x.responseText).err}catch(_){}msg.textContent='Update failed'+(e?': '+e:'')+'. The current firmware is still running.'}};\n"
+  "  x.onerror=()=>{btn.disabled=false;msg.textContent='Upload interrupted. The current firmware is still running.'};\n"
+  "  x.send(fd)}\n"
+  "async function doReset(){if($('#rstxt').value!=='RESET'){alert('Type RESET to confirm.');return}await api('/api/reset','POST',{confirm:'RESET'})}\n"
+  "\n"
+  "function loadSystem(){sysTab(sys)}\n"
+  "connectWS();\n"
+  "setInterval(()=>{if(last&&page==='home')renderHome(last)},1000);\n"
+  "</script>\n"
+  "</body>\n"
+  "</html>\n"
+  "\n";
 
 /* ============================ WEB ================================= */
 void sendUnauth(AsyncWebServerRequest* r) { r->send(401, "application/json", "{\"err\":\"auth\"}"); }
@@ -1852,6 +1949,24 @@ void webBegin() {
   server.on("/", HTTP_GET, sendIndex);
   server.on("/index.html", HTTP_GET, sendIndex);
 
+  // web-app install support: manifest + icon (lets phones "Add to Home screen"
+  // / "Install app" and open the panel full-screen like a native app)
+  server.on("/manifest.json", HTTP_GET, [](AsyncWebServerRequest* r) {
+    JsonDocument d;
+    d["name"] = "LEO " + gName; d["short_name"] = "LEO";
+    d["start_url"] = "/"; d["scope"] = "/"; d["display"] = "standalone";
+    d["background_color"] = "#0c0f12"; d["theme_color"] = "#0c0f12";
+    JsonObject ic = d["icons"].to<JsonArray>().add<JsonObject>();
+    ic["src"] = "/icon.svg"; ic["sizes"] = "any"; ic["type"] = "image/svg+xml"; ic["purpose"] = "any maskable";
+    String out; serializeJson(d, out); r->send(200, "application/manifest+json", out);
+  });
+  server.on("/icon.svg", HTTP_GET, [](AsyncWebServerRequest* r) {
+    r->send(200, "image/svg+xml",
+      "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><rect width='96' height='96' rx='22' fill='#0c0f12'/>"
+      "<g fill='none' stroke='#34d3b0' stroke-width='5' stroke-linecap='round' stroke-linejoin='round' transform='translate(18 14) scale(2.5)'>"
+      "<path d='M9 18h6M10 21h4M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z'/></g></svg>");
+  });
+
   // identity: who am I (stable id, never tied to mDNS)
   server.on("/api/identity", HTTP_GET, [](AsyncWebServerRequest* r) {
     JsonDocument d;
@@ -1971,6 +2086,39 @@ void webBegin() {
     scheduleRestart(800, true);
   });
 
+  // OTA firmware update: multipart upload of the compiled .bin, written
+  // straight into the inactive app slot. The running firmware stays active
+  // until the new image is fully written and verified; on any failure the
+  // device just keeps running the old one.
+  server.on("/api/ota", HTTP_POST,
+    [](AsyncWebServerRequest* r) {                    // runs after the upload finishes
+      if (!checkAuth(r)) return sendUnauth(r);
+      if (otaFailed || Update.hasError() || !Update.isFinished()) {
+        String e = otaErr.length() ? otaErr : String(Update.errorString());
+        r->send(500, "application/json", "{\"err\":\"" + e + "\"}");
+        return;
+      }
+      r->send(200, "application/json", "{\"ok\":1}");
+      logEvent("ERR", "OTA update installed - restarting");
+      scheduleRestart(1000, true);
+    },
+    [](AsyncWebServerRequest* r, const String& filename, size_t index, uint8_t* data, size_t len, bool final) {
+      if (index == 0) {
+        otaFailed = false; otaErr = "";
+        if (!checkAuth(r)) { otaFailed = true; otaErr = "auth"; return; }
+        if (Update.isRunning()) Update.abort();
+        dbg("OTA: receiving " + filename);
+        for (int i = 0; i < RELAY_COUNT; ++i) relaySetEx(i, false, false);   // safe state during flashing
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) { otaFailed = true; otaErr = Update.errorString(); return; }
+      }
+      if (otaFailed) return;
+      if (Update.write(data, len) != len) { otaFailed = true; otaErr = Update.errorString(); Update.abort(); return; }
+      if (final) {
+        if (!Update.end(true)) { otaFailed = true; otaErr = Update.errorString(); }
+        else dbg("OTA: " + String((unsigned)(index + len)) + " bytes written OK");
+      }
+    });
+
   // JSON body handlers
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/relay",   onJsonRelay));
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/all",     onJsonAll));
@@ -1999,6 +2147,7 @@ void setup() {
   stateLock = xSemaphoreCreateMutex();  // before anything else can touch shared state
   consoleLock = xSemaphoreCreateMutex();
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);           // USB-CDC: drop output instead of waiting for a reader
   setCpuFrequencyMhz(CPU_MHZ);        // run cooler; 80 MHz is ample for the web server
   pix.begin(); pix.setBrightness(NEOPIXEL_BRIGHT); ledState = LED_BOOT; ledTick();
 

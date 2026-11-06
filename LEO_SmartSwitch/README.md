@@ -1,5 +1,12 @@
 # LEO Smart Switch — ESP32-C3 (Phase 1)
 
+## What's new (v1.5.0 — web app + OTA)
+- **Web app instead of the Android app:** the panel every switch serves is now an installable web app (browser menu → *Add to Home screen* / *Install app*): live power and ₹/hr on Home, an all-devices dashboard with per-device wattage, "Everything On/Off" across every switch, and per-device sign-in for switches that have their own login.
+- **OTA firmware updates** from System → Device (see 8.3). Requires the *Minimal SPIFFS (OTA)* partition scheme.
+- **Fixed: every unit had device ID `LEO-000000`.** The ID was derived from `WiFi.macAddress()` before WiFi started, which returns zeros on core 3.x — so all switches had the same ID and ignored each other as "self". Now read from the eFuse MAC.
+- **Fixed 4-second relay toggles when the USB cable is in a PC.** With a USB host attached but no terminal reading, `if (Serial)` is still true and each log line blocked until the CDC TX timeout. Serial output is now non-blocking (`setTxTimeoutMs(0)` + only writing when the buffer has room). Toggles measured at 0.05–0.3 s on the real board.
+- Single-file sketch: web UI embedded as plain C string lines (raw string literals confused Arduino's prototype generator).
+
 ## What's new (v1.4.3 — stability pass)
 - **Save WiFi / Save AP / Reboot / Factory reset now report success.** Handlers called `delay()`+`ESP.restart()` on the AsyncTCP task, so the reply never left the device and the UI/app always showed a failure. Restarts are now scheduled from `loop()` after the reply is sent.
 - **Live console no longer disconnects on connect.** Replaying the 200-line history as 200 frames overflowed AsyncWebSocket's per-client queue (32), which closes the client → endless reconnect loop. History is now sent as one frame.
@@ -333,11 +340,24 @@ Uses the maintained `ESP32Async/ESPAsyncWebServer` + `ESP32Async/AsyncTCP` (see 
    | Setting | Value |
    |---------|-------|
    | Board | ESP32C3 Dev Module |
-   | Partition Scheme | any scheme **with a filesystem** (e.g. Default 4MB with spiffs) |
+   | Partition Scheme | **Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)** — required: the firmware no longer fits the 1.2 MB default app slot, and OTA needs two slots |
    | USB CDC On Boot | Enabled |
    | Upload speed | 921600 (lower if it fails) |
 
 4. **Upload:** the normal Upload button — that's it (web UI is inside the sketch).
+
+### 8.3 Over-the-air (OTA) updates
+After the first USB flash, update over WiFi: **Sketch → Export Compiled Binary**, then
+in the web app open **System → Device → Update firmware**, choose
+`LEO_SmartSwitch.ino.bin` (not the `merged` / `bootloader` / `partitions` files) and
+press **Upload & install**. The image is written to the spare app slot and only
+activated once fully verified — a failed or interrupted upload leaves the current
+firmware running. Settings and energy history are kept. Uses the same login /
+LAN-origin checks as every other setting (`POST /api/ota`, multipart).
+
+> Switching an existing board from the old *Default* scheme moves the data
+> partition, so the first USB flash with the new scheme starts with empty
+> settings (WiFi must be re-entered via the AP) unless you migrate them.
 
 ---
 
