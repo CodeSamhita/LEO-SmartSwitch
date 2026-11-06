@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "leo-webui-mock",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-I", "C:\\Users\\balak\\AppData\\Local\\Temp\\claude\\2e135e9f64b448fc\\5702882f-eda6-4bbd-94c8-93a848f59ce8\\scratchpad\\mockdev\\mock_leo.py", "LEO_SmartSwitch", "8765"],
+      "port": 8765
+    }
+  ]
+}
