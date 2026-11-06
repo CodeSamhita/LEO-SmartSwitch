@@ -444,7 +444,8 @@ send the `X-Auth-Token` header obtained from `/api/login`.
 |---------|--------------------|
 | Compile error in ESPAsyncWebServer | Using the old me-no-dev / mathieucarbou fork — switch to **ESP32Async** |
 | Settings don't persist | Partition scheme has no filesystem — pick one with SPIFFS/LittleFS |
-| `leoswitch.local` won't resolve | Use the IP shown on the clock row; some networks block mDNS |
+| `leoswitch.local` won't resolve | Use the IP shown on the clock row; some networks block mDNS, and many Android phones don't resolve `.local` names at all |
+| Phone Chrome: `ERR_TOO_MANY_RETRIES` on the switch *and* the router page | Chrome on the phone is blocked from the local network (other browsers work). Allow Chrome's local-network / "Nearby devices" permission in Android app settings, or use another browser. The switch never even receives the request. |
 | Relays click ON at boot | Confirm the board is **active-LOW**; check `RELAY_ACTIVE_LOW` in the CONFIG block |
 | WiFi unstable on C3 | Keep `WIFI_TX_POWER` low; check antenna/USB power quality |
 | Not visible in UPnP browser | Normal on some networks — use mDNS / the app instead |
