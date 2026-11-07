@@ -12,7 +12,7 @@ and open no hotspot.
 
 | Folder | Device | Firmware |
 |---|---|---|
-| [`LEO_Hub/`](LEO_Hub/LEO_Hub.ino) | Hub, ESP32-S3 (8 MB) | 2.0.1 |
+| [`LEO_Hub/`](LEO_Hub/LEO_Hub.ino) | Hub, ESP32-S3 (8 MB) | 2.0.2 |
 | [`LEO_SwitchEdge/`](LEO_SwitchEdge/LEO_SwitchEdge.ino) | 4-relay smart switch, ESP32-C3 Super Mini | 2.7.0 |
 | [`LEO_TankEdge/`](LEO_TankEdge/LEO_TankEdge.ino) | Water-tank monitor, ESP32-C3 Super Mini | 1.8.0 |
 

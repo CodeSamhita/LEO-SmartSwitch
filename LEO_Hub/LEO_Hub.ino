@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.0.1"
+#define HUB_FW            "2.0.2"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -1433,7 +1433,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  </div><div data-tab=\"alarms\">\n"
   "  <h3>Alarm rules${q('Each rule watches the water level. When the level RISES TO or DROPS TO its %, the tank plays the chosen sound the chosen number of times and flashes its level LEDs in the chosen colour. A rule fires once, then waits until the level has moved 5 % back before it can fire again. A press on the tank\\'s button or Silence alarm stops it. Rules run on the tank itself, so they work without the hub.')}</h3>\n"
   "  <div class=\"card\">\n"
-  "    ${c.rules?c.rules.map((r,i)=>`<details class=\"rule\" data-rule=\"${i}\"><summary><span class=\"pill ${r[0]?'':'off'}\">${i+1}</span><span class=\"rd\">${ruleDesc(r)}</span><span class=\"chev\">›</span></summary>\n"
+  "    ${c.rules?c.rules.map((r,i)=>[r,i]).sort((a,b)=>(b[0][0]-a[0][0])||(b[0][1]-a[0][1])).map(([r,i],n)=>`<details class=\"rule\" data-rule=\"${i}\"><summary><span class=\"pill ${r[0]?'':'off'}\">${n+1}</span><span class=\"rd\">${ruleDesc(r)}</span><span class=\"chev\">›</span></summary>\n"
   "      <div class=\"switchrow\" style=\"margin:2px 0 0\"><span>Rule on</span><button class=\"tgl ${r[0]?'on':''}\" data-k=\"on\" onclick=\"this.classList.toggle('on')\"></button></div>\n"
   "      <div class=\"row\" style=\"margin-top:6px\"><select data-k=\"dir\">${opts(['When level rises to','When level drops to'],r[2])}</select><input data-k=\"level\" type=\"number\" min=\"0\" max=\"100\" value=\"${r[1]}\" style=\"flex:0 0 74px\"><span class=\"meta\" style=\"flex:0 0 auto;align-self:center\">%</span></div>\n"
   "      <div class=\"row\" style=\"margin-top:6px\"><select data-k=\"pattern\">${opts(SNDS,r[3])}</select><input data-k=\"repeats\" type=\"number\" min=\"1\" max=\"30\" value=\"${r[4]||1}\" style=\"flex:0 0 64px\" title=\"Times\"><span class=\"meta\" style=\"flex:0 0 auto;align-self:center\">times</span></div>\n"

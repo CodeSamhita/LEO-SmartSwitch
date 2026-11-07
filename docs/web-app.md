@@ -35,7 +35,7 @@ Tabs: **Overview** (relays, power chart) · **Relays** (names, watts, in use) ·
 
 ## Tank page
 Tabs: **Overview** (live view, actions, chart) · **Alarms** (rules, buzzer, quiet hours) · **Display** (colours, highlight, LEDs, daytime display) · **Setup** (tank size, status labels, name, restart, update, remove, Advanced).
-The alarm rules are a short list (for example *Rises to 95 % · Long beeps ×8 · Blue*); tap a rule to edit it.
+The alarm rules are a short list sorted by level, highest first (switched-off rules last), for example *Rises to 95 % · Long beeps ×8 · Blue*; tap a rule to edit it.
 - **Live view:** level, distance, status, room light, signal and firmware.
 - **Actions:** **Silence alarm**, **Beep** (a short test beep) and **Identify**.
 - **Water level:** a chart with **1 h / 6 h / 24 h / Yesterday / 7 days**, the last point live, plus the lowest and highest level.
