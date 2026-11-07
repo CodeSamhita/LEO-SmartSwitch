@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.7.0"
+#define HUB_FW            "1.8.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -69,10 +69,10 @@
 #define LEO_MAGIC  0x4C45
 #define LEO_PROTO  2
 enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5, M_TANK_INFO = 6,
-                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14 };
+                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12 };   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright, value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13 };   // C_FACTORY: wipe all settings + pairing, restart   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright, value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -82,6 +82,7 @@ struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; };   // tank settings (palette 0 red-blue, 1 red-green; tank 1.5+)
+struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -132,6 +133,8 @@ struct Dev {
   float    tFullCm, tEmptyCm;
   uint8_t  tFullPct, tLowPct, tBuzzer, tQuietFrom, tQuietTo, tPalette, tLedCount, tShowFrom, tShowTo, tMinBright;
   uint8_t  hideMask;                      // switch relays marked "not in use" (hidden, skipped by All on) - saved in devices.json
+  bool     diagKnown;                     // chip details from M_DIAG (Advanced view)
+  int16_t  dTemp; uint32_t dHeap, dHeapMin, dFsUsed, dFsTotal, dFlash, dSketch, dSketchMax; uint8_t dReset, dCpu; char dSdk[16];
 };
 Dev devs[MAX_DEV];
 SemaphoreHandle_t devLock;
@@ -139,6 +142,12 @@ struct DevGuard { DevGuard() { xSemaphoreTake(devLock, portMAX_DELAY); } ~DevGua
 
 struct TxItem { uint8_t mac[6]; MsgCmd cmd; };
 struct TxResult { uint8_t mac[6]; bool ok; };
+/* 24 h trend per device: one value per 5-minute slot (switch: average watts, tank: level x10); 0xFFFF = no data */
+#define HIST_SLOTS 288
+#define HIST_STEP  300
+#define HIST_FILE  "/hist.bin"
+struct Hist { bool used; uint8_t mac[6]; uint32_t lastSlot; uint32_t accSum; uint16_t accN; uint16_t v[HIST_SLOTS]; };
+Hist hist[4];
 QueueHandle_t rxq, txq, txres;
 
 Preferences prefs;
@@ -287,6 +296,55 @@ void activity(const String& msg, bool blocked) {
     File w = LittleFS.open(ACT_FILE, "w"); if (w) { w.print(rest); w.close(); }
   } else if (f) f.close();
   xSemaphoreGive(actLock);
+}
+
+/* --------------------------- 24 h trends ---------------------------- */
+Hist* histFor(const uint8_t* mac, uint32_t createAtSlot) {     // createAtSlot 0 = don't create
+  for (int k = 0; k < 4; ++k) if (hist[k].used && !memcmp(hist[k].mac, mac, 6)) return &hist[k];
+  if (!createAtSlot) return nullptr;
+  for (int k = 0; k < 4; ++k) if (!hist[k].used) {
+    Hist& h = hist[k]; memset(&h, 0, sizeof(h)); h.used = true; memcpy(h.mac, mac, 6); h.lastSlot = createAtSlot;
+    for (int s = 0; s < HIST_SLOTS; ++s) h.v[s] = 0xFFFF;
+    return &h;
+  }
+  return nullptr;
+}
+void histDrop(const uint8_t* mac) { Hist* h = histFor(mac, 0); if (h) h->used = false; }
+void histSave() {
+  File f = LittleFS.open(HIST_FILE, "w"); if (!f) return;
+  uint32_t magic = 0x4C484931; f.write((uint8_t*)&magic, 4); f.write((uint8_t*)hist, sizeof(hist)); f.close();
+}
+void histLoad() {
+  File f = LittleFS.open(HIST_FILE, "r"); if (!f) return;
+  uint32_t magic = 0;
+  if (f.size() == 4 + sizeof(hist) && f.read((uint8_t*)&magic, 4) == 4 && magic == 0x4C484931) f.read((uint8_t*)hist, sizeof(hist));
+  else memset(hist, 0, sizeof(hist));
+  f.close();
+}
+void histTick() {                       // once a second from loop(): advance slots, then add the current values
+  if (!timeValid()) return;
+  uint32_t slot = (uint32_t)time(nullptr) / HIST_STEP; bool save = false;
+  for (int k = 0; k < 4; ++k) {
+    Hist& h = hist[k]; if (!h.used || slot == h.lastSlot) continue;
+    h.v[h.lastSlot % HIST_SLOTS] = h.accN ? (uint16_t)(h.accSum / h.accN) : 0xFFFF;
+    uint32_t gap = slot > h.lastSlot ? slot - h.lastSlot : HIST_SLOTS;        // clock jumped back -> start over
+    for (uint32_t s = 1; s < gap && s <= HIST_SLOTS; ++s) h.v[(h.lastSlot + s) % HIST_SLOTS] = 0xFFFF;
+    h.lastSlot = slot; h.accSum = 0; h.accN = 0; h.v[slot % HIST_SLOTS] = 0xFFFF;
+    if (slot % 6 == 0) save = true;                                           // write to flash every 30 min
+  }
+  struct { uint8_t mac[6]; uint16_t v; } now[MAX_DEV]; int n = 0;
+  { DevGuard g;
+    for (int i = 0; i < MAX_DEV; ++i) {
+      Dev& d = devs[i]; if (!d.used || !d.lastSeen || millis() - d.lastSeen >= OFFLINE_MS) continue;
+      if (d.type == DEV_SWITCH && d.infoKnown) {
+        float w = 0; for (int r = 0; r < 4; ++r) if (d.onMask & (1 << r)) w += d.watts[r];
+        memcpy(now[n].mac, d.mac, 6); now[n].v = (uint16_t)constrain(w + 0.5f, 0.0f, 65000.0f); n++;
+      } else if (d.type == DEV_TANK && d.sensorOk) {
+        memcpy(now[n].mac, d.mac, 6); now[n].v = (uint16_t)constrain(d.levelPct * 10 + 0.5f, 0.0f, 1000.0f); n++;
+      }
+    } }
+  for (int k = 0; k < n; ++k) { Hist* h = histFor(now[k].mac, slot); if (h) { h->accSum += now[k].v; h->accN++; } }
+  if (save) histSave();
 }
 
 /* ---------------------------- night lock --------------------------- */
@@ -577,6 +635,12 @@ void handlePacket(const RxItem& it) {
     d.tBuzzer = m.buzzer; d.tQuietFrom = m.quietFrom; d.tQuietTo = m.quietTo; d.tPalette = m.palette; d.tLedCount = m.ledCount;
     d.tShowFrom = m.showFrom; d.tShowTo = m.showTo; d.tMinBright = m.minBright;
     d.tcfgKnown = true; stateDirty = true;
+  } else if (h->type == M_DIAG && blen >= sizeof(MsgDiag)) {
+    MsgDiag m; memcpy(&m, it.data, sizeof(m));
+    DevGuard g; Dev& d = devs[i];
+    d.dTemp = m.tempC10; d.dHeap = m.heapFree; d.dHeapMin = m.heapMin; d.dFsUsed = m.fsUsed; d.dFsTotal = m.fsTotal;
+    d.dFlash = m.flashSize; d.dSketch = m.sketchSize; d.dSketchMax = m.sketchMax; d.dReset = m.resetReason; d.dCpu = m.cpuMHz;
+    copyStr(d.dSdk, sizeof(d.dSdk), m.sdk); d.diagKnown = true;
   } else if (h->type == M_OTA_ACK && blen >= sizeof(MsgOtaAck)) {
     MsgOtaAck a; memcpy(&a, it.data, sizeof(a));
     edgeOtaOnAck(it.mac, a);
@@ -588,11 +652,32 @@ void wifiEvent(WiFiEvent_t e) {           // WiFi event task: flags only
   if (e == ARDUINO_EVENT_WIFI_STA_GOT_IP) netUpPending = true;
   if (e == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) netDownPending = true;
 }
+/* factory reset of the hub: tell every paired edge to forget us, wipe settings + files, restart.
+   Afterwards the setup hotspot has NO password until WiFi is configured again (else you'd be locked out). */
+bool factoryPending = false; bool setupMode = false;
+void hubFactoryReset() {
+  dbg("FACTORY RESET - telling paired devices to forget this hub");
+  for (int i = 0; i < MAX_DEV; ++i) {
+    bool ok; { DevGuard g; ok = devs[i].used && devs[i].hasKey && devs[i].session; }
+    if (ok) { MsgCmd c = {}; fillHdr(c.h, M_CMD); c.cmd = C_UNPAIR; sendSigned(i, &c, sizeof(c)); delay(30); sendSigned(i, &c, sizeof(c)); delay(30); }
+  }
+  prefs.clear(); prefs.putBool("setup", true);
+  LittleFS.format();
+  delay(200); ESP.restart();
+}
+#define HUB_RESET_PIN 0                  // BOOT button on the ESP32-S3 board: hold 10 s = factory reset
+uint32_t resetHeldSince = 0;
+bool resetArmed() { return resetHeldSince && millis() - resetHeldSince > 2000; }
+void resetBtnTick() {
+  if (digitalRead(HUB_RESET_PIN) != LOW) { resetHeldSince = 0; return; }
+  if (!resetHeldSince) resetHeldSince = millis();
+  if (millis() - resetHeldSince >= 10000) { resetHeldSince = 0; factoryPending = true; }
+}
 String apSsid() { return "LEO-Hub-" + hubId.substring(4); }
 void apStart() {
   if (apUp) return;
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(apSsid().c_str(), apPass.c_str());
+  if (setupMode) WiFi.softAP(apSsid().c_str()); else WiFi.softAP(apSsid().c_str(), apPass.c_str());   // setup after a factory reset: open
   apUp = true; dbg("Emergency hotspot " + apSsid() + " at 192.168.4.1");
 }
 void apStop() { if (!apUp) return; WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); apUp = false; dbg("Emergency hotspot off"); }
@@ -754,6 +839,7 @@ static const char INDEX_HTML[] PROGMEM =
   ".chev{color:var(--mut);font-size:20px;line-height:1}\n"
   ".kv{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed #1e2731;font-size:13px}.kv:last-child{border:0}.kv span{color:var(--mut)}\n"
   ".btn:disabled{opacity:.45}\n"
+  "details.adv summary{cursor:pointer;font-weight:650;color:var(--mut);list-style:none}details.adv summary:before{content:\"▸ \"}details.adv[open] summary:before{content:\"▾ \"}\n"
   ".hlp{display:inline-grid;place-items:center;width:17px;height:17px;border:1px solid var(--mut);border-radius:50%;font-size:10.5px;font-weight:700;color:var(--mut);margin-left:6px;cursor:pointer;vertical-align:1px;text-transform:none}\n"
   ".hlpt{display:none;background:var(--s2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:6px 0;font-size:12px;color:var(--txt);text-transform:none;letter-spacing:0;font-weight:400}.hlpt.show{display:block}\n"
   "</style>\n"
@@ -790,7 +876,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  </section>\n"
   "\n"
   "  <section class=\"page\" id=\"p-activity\">\n"
-  "    <div class=\"row\" style=\"margin:0 0 10px\"><button class=\"btn\" onclick=\"loadActivity()\">Refresh</button></div>\n"
+  "    <div class=\"row\" style=\"margin:0 0 10px\"><button class=\"btn\" onclick=\"loadActivity()\">Refresh</button><button class=\"btn d\" onclick=\"clearActivity()\">Clear log</button></div>\n"
   "    <div class=\"card\" id=\"actlist\"><div class=\"meta\">Loading…</div></div>\n"
   "  </section>\n"
   "\n"
@@ -831,20 +917,29 @@ static const char INDEX_HTML[] PROGMEM =
   "      <div class=\"row\"><button class=\"btn p\" onclick=\"hubOta()\">Upload &amp; install</button></div>\n"
   "      <div class=\"bar\"><i id=\"hubbar\"></i></div><div class=\"note\" id=\"hubotamsg\"></div>\n"
   "    </div>\n"
-  "    <h3>Live log</h3>\n"
-  "    <div class=\"logbox\" id=\"log\">Connecting…</div>\n"
+  "    <details class=\"card adv\" style=\"margin-top:18px\" ontoggle=\"if(this.open)loadHubAdv()\"><summary>Advanced</summary>\n"
+  "      <div id=\"hubadv\" class=\"meta\">Loading…</div>\n"
+  "      <div class=\"switchrow\" style=\"margin-top:14px\"><span><b>Live log</b></span><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"clearConsole()\">Clear</button></div>\n"
+  "      <div class=\"logbox\" id=\"log\" style=\"margin-top:8px\">Connecting…</div>\n"
+  "      <div class=\"row\" style=\"margin-top:16px\"><button class=\"btn d\" onclick=\"hubFactory()\">Factory reset the hub…</button></div>\n"
+  "      <p class=\"note\">Erases WiFi, password, devices, names and logs. Paired devices are told to forget the hub. Afterwards join the hotspot <b>LEO-Hub-…</b> (no password) and open 192.168.4.1 to set WiFi again. Also possible by holding the hub's <b>BOOT</b> button for 10 seconds (its light blinks red after 2 s).</p>\n"
+  "    </details>\n"
   "  </section>\n"
   "\n"
   "  <section class=\"page\" id=\"p-sw\">\n"
   "    <div class=\"row\" style=\"margin:0 0 12px\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"nav('home')\">‹ Back</button></div>\n"
   "    <div id=\"swlive\"></div>\n"
+  "    <h3>Power use — last 24 hours</h3><div class=\"card\" id=\"swchart\"><div class=\"meta\">Loading…</div></div>\n"
   "    <div id=\"swset\"></div>\n"
+  "    <details class=\"card adv\" id=\"swadvd\" style=\"margin-top:14px\" ontoggle=\"if(this.open)loadAdv(swMac,'#swadv')\"><summary>Advanced</summary><div id=\"swadv\" class=\"meta\">Loading…</div></details>\n"
   "  </section>\n"
   "\n"
   "  <section class=\"page\" id=\"p-tank\">\n"
   "    <div class=\"row\" style=\"margin:0 0 12px\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"nav('home')\">‹ Back</button></div>\n"
   "    <div id=\"tlive\"></div>\n"
+  "    <h3>Water level — last 24 hours</h3><div class=\"card\" id=\"tchart\"><div class=\"meta\">Loading…</div></div>\n"
   "    <div id=\"tset\"></div>\n"
+  "    <details class=\"card adv\" id=\"tadvd\" style=\"margin-top:14px\" ontoggle=\"if(this.open)loadAdv(tankMac,'#tadv')\"><summary>Advanced</summary><div id=\"tadv\" class=\"meta\">Loading…</div></details>\n"
   "  </section>\n"
   "</div>\n"
   "\n"
@@ -888,7 +983,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function nav(p){page=p;$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
   "  $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));\n"
   "  if(p==='devices'){devKeys='';render()} if(p==='hub'){loadHub();logOn()}else logOff(); if(p==='activity')loadActivity();\n"
-  "  if(p==='tank'){tsetKey='';renderTank()} if(p==='sw'){swKey='';renderSw()} window.scrollTo(0,0)}\n"
+  "  if(p==='tank'){tsetKey='';renderTank();pageExtras('tank')} if(p==='sw'){swKey='';renderSw();pageExtras('sw')} window.scrollTo(0,0)}\n"
   "\n"
   "function render(){\n"
   "  const h=S.hub||{};$('#hubName').textContent=h.name||'LEO Home Hub';\n"
@@ -1139,6 +1234,66 @@ static const char INDEX_HTML[] PROGMEM =
   "}\n"
   "async function relUse(el,i){const u=!el.classList.contains('on');el.classList.toggle('on',u);if(!await post('/api/relayuse',{mac:swMac,idx:i,used:u}))el.classList.toggle('on',!u)}\n"
   "async function swRename(){const n=$('#swName').value.trim();if(!n)return;if(await cmd(swMac,4,{text:n}))toast('Name saved')}\n"
+  "\n"
+  "/* 24 h trend chart (one point per 5 minutes, gaps where the device was offline) */\n"
+  "let chartTimer=null;\n"
+  "function pageExtras(kind){\n"
+  "  const mac=kind==='tank'?tankMac:swMac,box=kind==='tank'?'#tchart':'#swchart',det=kind==='tank'?'#tadvd':'#swadvd';\n"
+  "  const go=()=>{if(page===kind)loadChart(mac,box,kind==='tank'?'%':'W')};\n"
+  "  go();clearInterval(chartTimer);chartTimer=setInterval(go,60000);\n"
+  "  const d=$(det);if(d)d.open=false;\n"
+  "}\n"
+  "function hm(t){return String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0')}\n"
+  "async function loadChart(mac,box,unit){\n"
+  "  const h=await jget('/api/history?mac='+encodeURIComponent(mac)),el=$(box);if(!el)return;\n"
+  "  if(!h||!h.end){el.innerHTML='<div class=\"meta\">No history yet — the hub records one point every 5 minutes.</div>';return}\n"
+  "  const v=h.v.map(x=>x==null?null:(unit==='%'?x/10:x)),pts=v.filter(x=>x!=null);\n"
+  "  if(!pts.length){el.innerHTML='<div class=\"meta\">No readings yet — the hub records one point every 5 minutes.</div>';return}\n"
+  "  const W=320,H=140,pl=30,pr=8,pt=8,pb=18,n=v.length,max=unit==='%'?100:Math.max(10,...pts)*1.15;\n"
+  "  const X=i=>pl+(W-pl-pr)*i/(n-1),Y=y=>pt+(H-pt-pb)*(1-y/max);\n"
+  "  let path='',pen=false;v.forEach((y,i)=>{if(y==null){pen=false;return}path+=(pen?'L':'M')+X(i).toFixed(1)+' '+Y(y).toFixed(1)+' ';pen=true});\n"
+  "  let g='';[0,.5,1].forEach(f=>{const y=Y(max*f);g+=`<line x1=\"${pl}\" x2=\"${W-pr}\" y1=\"${y}\" y2=\"${y}\" stroke=\"#25303a\"/><text x=\"${pl-4}\" y=\"${y+3}\" fill=\"#7d8b97\" font-size=\"9\" text-anchor=\"end\">${Math.round(max*f)}</text>`});\n"
+  "  [18,12,6,0].forEach(hh=>{const i=n-1-hh*12;g+=`<text x=\"${X(i)}\" y=\"${H-4}\" fill=\"#7d8b97\" font-size=\"9\" text-anchor=\"${hh?'middle':'end'}\">${hh?hm(new Date(h.end*1000-hh*3600e3)):'now'}</text>`});\n"
+  "  const last=pts[pts.length-1],col=unit==='%'?'var(--water)':'var(--warn)';\n"
+  "  let foot=unit==='%'?`Now ${last.toFixed(0)} % · lowest ${Math.min(...pts).toFixed(0)} % · highest ${Math.max(...pts).toFixed(0)} %`\n"
+  "    :`Energy in the last 24 h: ${(v.reduce((a,x)=>a+(x||0),0)*5/60/1000).toFixed(2)} kWh · peak ${Math.max(...pts)} W`;\n"
+  "  el.innerHTML=`<svg viewBox=\"0 0 ${W} ${H}\" width=\"100%\" style=\"display:block\">${g}<path d=\"${path}\" fill=\"none\" stroke=\"${col}\" stroke-width=\"1.8\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/></svg>\n"
+  "    <div class=\"meta\" style=\"margin-top:4px\">${foot}${q(unit==='%'?'Average water level of each 5-minute period over the last 24 hours. Gaps mean the tank was offline or had no sensor reading.':'Average power of each 5-minute period, from the watts you set for each relay. Energy is the total for the day; it is an estimate, not a meter reading.')}</div>`;\n"
+  "}\n"
+  "\n"
+  "/* Advanced: chip details + factory reset */\n"
+  "const RST=['unknown','power on','reset pin','software restart','crash','interrupt watchdog','task watchdog','watchdog','deep sleep','brownout (low power)','SDIO','USB','JTAG','eFuse','power glitch','CPU lockup'];\n"
+  "function fmtB(b){return b>=1048576?(b/1048576).toFixed(2)+' MB':Math.round(b/1024)+' KB'}\n"
+  "function advRows(a){const r=[];\n"
+  "  if(a.temp!==undefined)r.push(['Chip temperature',a.temp.toFixed(1)+' °C','The processor\\'s own sensor; it runs warmer than the room. Above ~80 °C is too hot.']);\n"
+  "  if(a.heap!==undefined)r.push(['Free memory',fmtB(a.heap)+' (lowest '+fmtB(a.heapMin)+')','Working memory (RAM) left. If the lowest value gets very small (under ~20 KB) the device may restart.']);\n"
+  "  if(a.fsTotal)r.push(['Storage used',fmtB(a.fsUsed)+' of '+fmtB(a.fsTotal),'Space for saved files (settings, logs, history).']);\n"
+  "  if(a.sketch)r.push(['Firmware size',fmtB(a.sketch)+' of '+fmtB(a.sketchMax),'Size of the program; it must fit in the update space for wireless updates to work.']);\n"
+  "  if(a.flash)r.push(['Flash chip',fmtB(a.flash),'Total flash memory on the board.']);\n"
+  "  if(a.psram)r.push(['PSRAM',fmtB(a.psram),'Extra memory chip on the board.']);\n"
+  "  if(a.cpu)r.push(['CPU speed',a.cpu+' MHz','']);\n"
+  "  if(a.reset!==undefined)r.push(['Last restart cause',RST[a.reset]||a.reset,'Why the chip last started. \"brownout\" means the power supply dipped; \"crash\" or \"watchdog\" means the program had a problem.']);\n"
+  "  if(a.uptime!==undefined)r.push(['Running for',up(a.uptime),'']);\n"
+  "  if(a.rssi!==undefined)r.push(['Signal',a.rssi+' dBm','Radio signal strength: -50 excellent, -70 good, -85 weak, below -90 unreliable.']);\n"
+  "  if(a.channel)r.push(['WiFi channel',a.channel,'The router\\'s channel. All LEO devices follow it automatically.']);\n"
+  "  if(a.mac)r.push(['MAC address',a.mac,'']);if(a.ip)r.push(['IP address',a.ip,'']);\n"
+  "  if(a.fw)r.push(['Firmware',a.fw,'']);if(a.sdk)r.push(['ESP-IDF',a.sdk,'Version of Espressif\\'s system software inside the firmware.']);\n"
+  "  return r.map(([k,v,h])=>`<div class=\"kv\"><span>${k}${h?q(h):''}</span><b>${esc(v)}</b></div>`).join('')}\n"
+  "async function loadAdv(mac,box){const el=$(box);el.innerHTML='Loading…';\n"
+  "  const a=await jget('/api/diag?mac='+encodeURIComponent(mac));if(!a){el.textContent='Not available.';return}\n"
+  "  el.innerHTML=(a.known?advRows(a):'<div class=\"meta\">Chip details arrive within a minute (device firmware: switch 2.6 / tank 1.6 or newer).</div>')+\n"
+  "    `<div class=\"row\" style=\"margin-top:14px\"><button class=\"btn d\" onclick=\"devFactory('${a.mac}')\">Factory reset this device…</button></div>\n"
+  "     <p class=\"note\">Erases this device's settings and pairing, removes it from the hub and restarts it. Pair it again with Devices → Allow new devices. Also possible by holding its button (switch: BOOT, tank: its push button) for 10 seconds — the light blinks red after 2 s.</p>`}\n"
+  "async function devFactory(mac){const d=S.devices.find(x=>x.mac===mac);if(!d)return;\n"
+  "  if(!confirm('Factory reset \"'+d.name+'\"? All its settings are erased and it must be paired again.'))return;\n"
+  "  if(!confirm('Really erase \"'+d.name+'\"?'))return;\n"
+  "  if(await cmd(mac,13)){toast('Factory reset sent');nav('home')}}\n"
+  "async function loadHubAdv(){const a=await jget('/api/hub');$('#hubadv').innerHTML=a?advRows(a):'Not available.'}\n"
+  "async function hubFactory(){if(!confirm('Factory reset the HUB? WiFi, password, all devices, names and logs are erased.'))return;\n"
+  "  if(prompt('Type RESET to confirm')!=='RESET')return;\n"
+  "  if(await post('/api/factory',{confirm:'RESET'}))alert('The hub is resetting. Join the WiFi hotspot \"LEO-Hub-…\" (no password), then open http://192.168.4.1 to set it up again.')}\n"
+  "async function clearActivity(){if(!confirm('Delete the whole activity log?'))return;if(await post('/api/clearactivity'))loadActivity()}\n"
+  "async function clearConsole(){if(await post('/api/clearconsole'))$('#log').textContent=''}\n"
   "</script>\n"
   "</body>\n"
   "</html>\n"
@@ -1216,6 +1371,10 @@ void webBegin() {
     JsonDocument d; d["name"] = hubName; d["id"] = hubId; d["fw"] = HUB_FW; d["ssid"] = cfgSsid;
     d["wifi"] = (WiFi.status() == WL_CONNECTED); d["ip"] = WiFi.localIP().toString();
     d["channel"] = WiFi.channel(); d["rssi"] = WiFi.RSSI(); d["heap"] = ESP.getFreeHeap();
+    d["heapMin"] = ESP.getMinFreeHeap(); d["temp"] = temperatureRead(); d["fsUsed"] = LittleFS.usedBytes(); d["fsTotal"] = LittleFS.totalBytes();
+    d["flash"] = ESP.getFlashChipSize(); d["sketch"] = ESP.getSketchSize(); d["sketchMax"] = ESP.getFreeSketchSpace(); d["psram"] = ESP.getPsramSize();
+    d["reset"] = (int)esp_reset_reason(); d["cpu"] = getCpuFrequencyMhz(); d["sdk"] = ESP.getSdkVersion(); d["uptime"] = millis() / 1000;
+    d["mac"] = WiFi.macAddress(); d["chip"] = ESP.getChipModel(); d["setupMode"] = setupMode;
     d["passwordSet"] = pwHash.length() > 0; d["apSsid"] = apSsid(); d["apPass"] = apPass;
     String s; serializeJson(d, s); r->send(200, "application/json", s);
   });
@@ -1231,7 +1390,43 @@ void webBegin() {
     s += "]}"; r->send(200, "application/json", s);
   });
 
-  /* ---- control ---- */
+  /* ---- trends, chip details, log clearing, factory reset ---- */
+  server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* r) {   // last 24 h, oldest first, null = no data
+    if (!authOk(r)) { r->send(401, "application/json", "{\"err\":\"login\"}"); return; }
+    uint8_t mac[6]; if (!r->hasParam("mac") || !parseMac(r->getParam("mac")->value(), mac)) { r->send(400); return; }
+    Hist* h = histFor(mac, 0);
+    String s; s.reserve(2200); s = "{\"step\":" + String(HIST_STEP) + ",\"end\":" + String(h ? (uint32_t)(h->lastSlot * HIST_STEP) : 0) + ",\"v\":[";
+    if (h) for (int k = HIST_SLOTS - 1; k >= 0; --k) {
+      uint16_t v = k == 0 ? (h->accN ? (uint16_t)(h->accSum / h->accN) : 0xFFFF) : h->v[(h->lastSlot - k) % HIST_SLOTS];
+      if (k != HIST_SLOTS - 1) s += ','; s += v == 0xFFFF ? String("null") : String(v);
+    }
+    s += "]}"; r->send(200, "application/json", s);
+  });
+  server.on("/api/diag", HTTP_GET, [](AsyncWebServerRequest* r) {        // an edge's chip details
+    if (!authOk(r)) { r->send(401, "application/json", "{\"err\":\"login\"}"); return; }
+    uint8_t mac[6]; if (!r->hasParam("mac") || !parseMac(r->getParam("mac")->value(), mac)) { r->send(400); return; }
+    JsonDocument d;
+    { DevGuard g; int i = findDev(mac); if (i < 0) { r->send(404); return; } Dev& v = devs[i];
+      d["mac"] = macStr(v.mac); d["fw"] = v.fw; d["rssi"] = v.rssi; d["uptime"] = v.uptime; d["known"] = v.diagKnown;
+      if (v.diagKnown) { d["temp"] = v.dTemp / 10.0; d["heap"] = v.dHeap; d["heapMin"] = v.dHeapMin; d["fsUsed"] = v.dFsUsed; d["fsTotal"] = v.dFsTotal;
+        d["flash"] = v.dFlash; d["sketch"] = v.dSketch; d["sketchMax"] = v.dSketchMax; d["reset"] = v.dReset; d["cpu"] = v.dCpu; d["sdk"] = v.dSdk; } }
+    String s; serializeJson(d, s); r->send(200, "application/json", s);
+  });
+  server.on("/api/clearactivity", HTTP_POST, [](AsyncWebServerRequest* r) {
+    if (!guard(r)) return;
+    xSemaphoreTake(actLock, portMAX_DELAY); LittleFS.remove(ACT_FILE); xSemaphoreGive(actLock);
+    activity("Activity log cleared (from " + who(r) + ")", false); jsonOk(r);
+  });
+  server.on("/api/clearconsole", HTTP_POST, [](AsyncWebServerRequest* r) {
+    if (!guard(r)) return;
+    xSemaphoreTake(consoleLock, portMAX_DELAY); consoleHead = 0; consoleCount = 0; xSemaphoreGive(consoleLock);
+    jsonOk(r);
+  });
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/factory", [](AsyncWebServerRequest* r, JsonVariant& j) {
+    if (!guard(r)) return;
+    if (String(j["confirm"] | "") != "RESET") { r->send(400, "application/json", "{\"err\":\"confirm\"}"); return; }
+    dbg("Factory reset requested from " + who(r)); jsonOk(r); factoryPending = true;
+  }));
   server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest* r) {
     if (!guard(r)) return; jsonOk(r); activity("Hub restarted (from " + who(r) + ")", false); restartAt = millis() + 800;
   });
@@ -1268,6 +1463,12 @@ void webBegin() {
                  idx <= 2 ? String(f, 1) + " cm" : idx <= 4 ? String((int)f) + " %" : String((int)f) + ":00";
       if (idx >= 1 && idx <= 12) activity(dn + ": " + names[idx] + " set to " + v + " (from " + who(r) + ")", false);
     }
+    if (cmd == C_FACTORY) {                                   // wipe the device and drop it from this hub
+      MsgCmd c = {}; fillHdr(c.h, M_CMD); c.cmd = C_FACTORY; sendSigned(i, &c, sizeof(c)); sendSigned(i, &c, sizeof(c));
+      { DevGuard g; devs[i].used = false; } histDrop(mac); devsSave(); stateDirty = true;
+      activity("Factory reset sent to '" + dn + "' - it restarts unpaired (from " + who(r) + ")", false);
+      jsonOk(r); return;
+    }
     uint8_t hide; { DevGuard g; hide = devs[i].hideMask; }
     if (cmd == C_ALL && val && hide) {                        // All on with unused relays: switch on only the ones in use
       uint8_t n; { DevGuard g; n = devs[i].n ? devs[i].n : 4; }
@@ -1293,7 +1494,7 @@ void webBegin() {
     int i; String dn; { DevGuard g; i = findDev(mac); if (i >= 0) dn = devs[i].name; }
     if (i >= 0) {
       MsgCmd c = {}; fillHdr(c.h, M_CMD); c.cmd = C_UNPAIR; sendSigned(i, &c, sizeof(c));   // tell it to drop its key
-      { DevGuard g; devs[i].used = false; }
+      { DevGuard g; devs[i].used = false; } histDrop(mac);
       devsSave(); stateDirty = true;
       activity("Forgot device '" + dn + "' (from " + who(r) + ")", false);
     }
@@ -1326,7 +1527,7 @@ void webBegin() {
     if (!guard(r)) return;
     String s = j["ssid"] | ""; String p = j["pass"] | "";
     if (!s.length()) { r->send(400, "application/json", "{\"err\":\"ssid\"}"); return; }
-    prefs.putString("ssid", s); if (p.length() || s != cfgSsid) prefs.putString("pass", p);
+    prefs.putString("ssid", s); if (p.length() || s != cfgSsid) prefs.putString("pass", p); prefs.remove("setup");
     activity("WiFi settings changed to '" + s + "' (from " + who(r) + ")", false);
     jsonOk(r); restartAt = millis() + 1000;
   }));
@@ -1443,6 +1644,9 @@ void setup() {
   lockFrom = prefs.getInt("lockF", 23 * 60); lockTo = prefs.getInt("lockT", 6 * 60);
   tokensLoad();
   devsLoad();
+  histLoad();
+  setupMode = prefs.getBool("setup", false);
+  pinMode(HUB_RESET_PIN, INPUT_PULLUP);
   setenv("TZ", "IST-5:30", 1); tzset();
   dbg("LEO Hub " HUB_FW " " + hubId);
 
@@ -1471,6 +1675,11 @@ void setup() {
    Peak 5/255 when the room is lit, 2/255 when dark (room light from the tank's LDR, else the clock). */
 void hubLedTick() {
   static uint32_t last = 0, shown = 0xFFFFFFFF; if (millis() - last < 20) return; last = millis();
+  if (resetArmed()) {                                       // BOOT held: factory reset is armed
+    uint32_t c = ((millis() / 120) % 2) ? ledA.Color(40, 0, 0) : 0;
+    if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
+    return;
+  }
   if (millis() < BOOT_GLOW_MS) {                            // power-on glow still fading out
     uint8_t k = bootGlowLevel(); uint32_t c = ledA.Color(k, k * 3 / 5, k / 4);
     if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
@@ -1493,6 +1702,9 @@ void hubLedTick() {
 void loop() {
   esp_task_wdt_reset();
   hubLedTick();
+  resetBtnTick();
+  if (factoryPending) hubFactoryReset();
+  { static uint32_t lastHist = 0; if (millis() - lastHist >= 1000) { lastHist = millis(); histTick(); } }
   serialTick();
   ws.cleanupClients(); consoleWs.cleanupClients();
   wifiTick();

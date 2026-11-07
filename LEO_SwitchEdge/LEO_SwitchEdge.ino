@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.5.0-sw"
+#define EDGE_FW           "2.6.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -63,10 +63,10 @@ static const int TOUCH_GPIO[RELAY_COUNT] = { 4, 5, 6, 7 };
 #define LEO_MAGIC  0x4C45
 #define LEO_PROTO  2
 enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5, M_TANK_INFO = 6,
-                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14 };
+                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12 };   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright, value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13 };   // C_FACTORY: wipe all settings + pairing, restart   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright, value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -76,6 +76,7 @@ struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; };   // tank settings (palette 0 red-blue, 1 red-green; tank 1.5+)
+struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -286,6 +287,35 @@ void forgetHub(const char* why) {
   goSearching("unpaired");
 }
 
+/* chip details for the hub's Advanced view (sent on link, on request and every minute) */
+void sendDiag() {
+  MsgDiag m = {}; fillHdr(m.h, M_DIAG);
+  m.tempC10 = (int16_t)(temperatureRead() * 10);
+  m.heapFree = ESP.getFreeHeap(); m.heapMin = ESP.getMinFreeHeap();
+  m.fsUsed = LittleFS.usedBytes(); m.fsTotal = LittleFS.totalBytes();
+  m.flashSize = ESP.getFlashChipSize(); m.sketchSize = ESP.getSketchSize(); m.sketchMax = ESP.getFreeSketchSpace();
+  m.resetReason = (uint8_t)esp_reset_reason(); m.cpuMHz = (uint8_t)getCpuFrequencyMhz();
+  copyStr(m.sdk, sizeof(m.sdk), ESP.getSdkVersion());
+  sendHub(&m, sizeof(m));
+}
+/* factory reset: forget the hub, the key and every setting (names, watts, touch), then restart unpaired */
+void factoryReset(const char* why) {
+  dbg(String("FACTORY RESET: ") + why);
+  for (int i = 0; i < RELAY_COUNT; ++i) relaySet(i, false);
+  prefs.clear(); LittleFS.remove(CFG_FILE);
+  restartAt = millis() + 300;
+}
+/* BOOT button (GPIO9) held 10 s = factory reset; the LED blinks red after 2 s so you know it is armed */
+#define RESET_BTN_PIN 9
+#define RESET_HOLD_MS 10000
+uint32_t resetHeldSince = 0;
+void resetBtnTick() {
+  if (digitalRead(RESET_BTN_PIN) != LOW) { resetHeldSince = 0; return; }
+  if (!resetHeldSince) resetHeldSince = millis();
+  if (millis() - resetHeldSince >= RESET_HOLD_MS && !restartAt) factoryReset("BOOT button held 10 s");
+}
+bool resetArmed() { return resetHeldSince && millis() - resetHeldSince > 2000; }
+
 void handleCmd(const MsgCmd& c) {
   switch (c.cmd) {
     case C_RELAY:   relaySet(c.idx, c.val); break;
@@ -299,8 +329,9 @@ void handleCmd(const MsgCmd& c) {
         configSave(); sendInfo();
       } break;
     case C_REBOOT:  restartAt = millis() + 300; break;
-    case C_INFO:    sendInfo(); stateDirty = true; break;
+    case C_INFO:    sendInfo(); sendDiag(); stateDirty = true; break;
     case C_UNPAIR:  forgetHub("hub asked us to forget it"); break;
+    case C_FACTORY: factoryReset("requested from the web app"); break;
     case C_TOUCH:   touchEnabled = c.val != 0; configSave(); sendInfo();
                     dbg(String("Touch buttons ") + (touchEnabled ? "enabled" : "disabled")); break;
   }
@@ -325,7 +356,7 @@ void handleWelcome(const RxItem& it) {
   if (changed) { prefs.putBytes("hub", hubMac, 6); prefs.putUChar("ch", channel); }
   linked = true; linkedSince = millis(); lastVerified = millis();
   dbg("Linked to hub " + macStr(hubMac) + " (" + String(w.hubName) + ") on channel " + String(channel) + " - signed session");
-  sendInfo(); sendState();
+  sendInfo(); sendState(); sendDiag();
 }
 
 void handlePacket(const RxItem& it) {
@@ -429,7 +460,9 @@ void ledTick() {
   static uint32_t last = 0; static uint32_t shown = 0xFFFFFFFF;
   if (millis() - last < 30) return; last = millis();
   uint32_t c;
-  if (millis() < BOOT_GLOW_MS) {
+  if (resetArmed()) {                                   // holding BOOT for a factory reset
+    c = ((millis() / 120) % 2) ? pix.Color(40, 0, 0) : 0;
+  } else if (millis() < BOOT_GLOW_MS) {
     c = bootGlowColor(bootGlowLevel());
   } else if (millis() < identifyUntil) {
     c = ((millis() / 150) % 2) ? pix.Color(90, 90, 90) : 0;
@@ -469,6 +502,7 @@ void setup() {
   configLoad();
   relaysInit();                                   // all OFF, glitch-safe
   touchInit();
+  pinMode(RESET_BTN_PIN, INPUT_PULLUP);
   if (prefs.getBytes("hub", hubMac, 6) == 6) hubKnown = true;
   if (prefs.getBytes("key", key, 16) == 16) hasKey = true;
   uint8_t ch = prefs.getUChar("ch", 1);
@@ -494,6 +528,8 @@ void loop() {
   esp_task_wdt_reset();
   serialTick();
   touchTick();
+  resetBtnTick();
+  { static uint32_t lastDiag = 0; if (linked && millis() - lastDiag > 60000) { lastDiag = millis(); sendDiag(); } }
   RxItem it; int n = 0;
   while (n++ < 12 && xQueueReceive(rxq, &it, 0) == pdTRUE) handlePacket(it);
   linkTick();
