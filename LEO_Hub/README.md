@@ -28,6 +28,23 @@ Libraries: ESPAsyncWebServer + AsyncTCP (ESP32Async), ArduinoJson 7, Adafruit Ne
 - **Edges keep working without the hub**: relays hold their state (all OFF only after
   a power cut).
 
+## Switch edge hardware (2.1.0)
+| Function | GPIO |
+|---|---|
+| Relays 1–4 (active-low) | 0, 1, 3, 10 |
+| Touch buttons 1–4 (TTP223 OUT, HIGH = touched) | 4, 5, 6, 7 |
+| Status LED (WS2812 / NeoPixel) | 2 |
+
+- **Touch buttons** toggle their relay directly, so they work even when the hub is offline.
+  The hub logs the change when it hears the switch again. Unwired pins are pulled down and
+  never trigger. For modules that pull LOW when touched, set `TOUCH_ACTIVE_HIGH 0`.
+  Night lock only blocks the app, not a person at the switch.
+- **Status LED** (replaces the power LED): one slow breath, then dark.
+  Green with a long pause means linked; amber with a shorter pause means looking for the hub;
+  blue means never paired; cyan means a firmware update is in progress; quick white blinks mean identify.
+  Brightness follows the time of day sent by the hub, from about 18/255 at midday down to
+  about 2/255 at night, with dawn and dusk ramps. If the time is unknown it stays at the night level.
+
 ## Updating firmware (no cable)
 - **Hub:** Arduino *Export Compiled Binary* → web app **Hub → Update hub firmware** → `LEO_Hub.ino.bin`.
 - **Edge:** *Export Compiled Binary* of the edge sketch → web app **Devices → (device) →

@@ -44,7 +44,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.1.2"
+#define HUB_FW            "1.1.3"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -75,7 +75,7 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; };
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; };   // hub local time, minutes after midnight (-1 unknown)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; };
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; };
@@ -1259,7 +1259,11 @@ void loop() {
         due = d.used && d.hasKey && d.session && millis() - d.lastPing > (d.pingRetry ? 300u : (uint32_t)PING_MS) &&
               !(eota.active && !memcmp(eota.mac, d.mac, 6));
         if (due) d.lastPing = millis(); }
-      if (due) { MsgPing p = {}; fillHdr(p.h, M_PING); sendSigned(i, &p, sizeof(p)); }
+      if (due) {
+        MsgPing p = {}; fillHdr(p.h, M_PING); p.mins = -1;
+        if (timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); p.mins = tm.tm_hour * 60 + tm.tm_min; }
+        sendSigned(i, &p, sizeof(p));
+      }
     }
   }
 

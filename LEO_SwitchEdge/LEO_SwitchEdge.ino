@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.0.1-sw"
+#define EDGE_FW           "2.1.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -48,6 +48,11 @@
 #define SCAN_DWELL_MS     250         // per channel while searching
 static const int RELAY_GPIO_POOL[RELAY_COUNT] = { 0, 1, 3, 10 };
 static const char* RELAY_DEFAULT_NAMES[RELAY_COUNT] = { "Relay 1", "Relay 2", "Relay 3", "Relay 4" };
+// Touch buttons (TTP223-style modules: OUT goes HIGH while touched). Button N toggles relay N and
+// works with or without the hub. Unconnected pins are pulled down, so they never trigger.
+static const int TOUCH_GPIO[RELAY_COUNT] = { 4, 5, 6, 7 };
+#define TOUCH_ACTIVE_HIGH 1           // set 0 for modules wired/jumpered to pull LOW when touched
+#define TOUCH_DEBOUNCE_MS 40
 
 /* ===================== LEO EDGE PROTOCOL v2 ==========================
    Keep IDENTICAL in the hub and every edge sketch. Packed, little-endian.
@@ -65,7 +70,7 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; };
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; };   // hub local time, minutes after midnight (-1 unknown)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; };
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; };
@@ -119,6 +124,7 @@ uint8_t  key[16]; bool hasKey = false;
 uint32_t nonce = 0, txCtr = 0, rxCtr = 0;
 uint8_t  channel = 1, txSeq = 0;
 uint8_t scanStep = 0;
+int16_t  hubMins = -1; uint32_t hubMinsAt = 0;   // time of day from the hub; keeps running locally if the hub goes away
 uint32_t lastState = 0, lastScanStep = 0, lastVerified = 0, linkedSince = 0, identifyUntil = 0, restartAt = 0;
 bool     stateDirty = true;
 bool     otaActive = false; uint32_t otaSize = 0, otaWritten = 0;
@@ -149,6 +155,28 @@ void relaySet(int i, bool on) {
   digitalWrite(relays[i].gpio, on ? relayOnLevel() : relayOffLevel());
   dbg("Relay " + String(i) + " (" + relays[i].name + ") -> " + (on ? "ON" : "OFF"));
   stateDirty = true;
+}
+
+/* ---------------------------- touch buttons ------------------------- */
+bool touchStable[RELAY_COUNT], touchRaw[RELAY_COUNT]; uint32_t touchChangedAt[RELAY_COUNT];
+bool touchRead(int i) { return (digitalRead(TOUCH_GPIO[i]) == HIGH) == (TOUCH_ACTIVE_HIGH == 1); }
+void touchInit() {
+  for (int i = 0; i < RELAY_COUNT; ++i) {
+    pinMode(TOUCH_GPIO[i], TOUCH_ACTIVE_HIGH ? INPUT_PULLDOWN : INPUT_PULLUP);
+    touchStable[i] = touchRaw[i] = touchRead(i);       // a pad held at boot does not toggle
+    touchChangedAt[i] = millis();
+  }
+}
+void touchTick() {
+  if (millis() < 1500) return;                         // TTP223 self-calibrates after power-up
+  for (int i = 0; i < RELAY_COUNT; ++i) {
+    bool r = touchRead(i);
+    if (r != touchRaw[i]) { touchRaw[i] = r; touchChangedAt[i] = millis(); continue; }
+    if (r != touchStable[i] && millis() - touchChangedAt[i] >= TOUCH_DEBOUNCE_MS) {
+      touchStable[i] = r;
+      if (r) { dbg("Touch " + String(i + 1)); relaySet(i, !relays[i].on); }   // toggle on touch, not on release
+    }
+  }
 }
 
 /* ------------------------------ config ----------------------------- */
@@ -288,7 +316,10 @@ void handlePacket(const RxItem& it) {
   if (!blen || ctr <= rxCtr) return;                             // forged, wrong session or replay
   rxCtr = ctr; lastVerified = millis();
 
-  if (h->type == M_PING) return;
+  if (h->type == M_PING) {
+    if (blen >= sizeof(MsgPing)) { MsgPing p; memcpy(&p, it.data, sizeof(p)); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } }
+    return;
+  }
   if (h->type == M_CMD && blen >= sizeof(MsgCmd)) { MsgCmd c; memcpy(&c, it.data, sizeof(c)); handleCmd(c); return; }
 
   if (h->type == M_OTA_BEGIN && blen >= sizeof(MsgOtaBegin)) {
@@ -332,13 +363,43 @@ void linkTick() {
   if (hubKnown && k < 2) { addPeer(hubMac); sendHello(hubMac); }
   else { addPeer(BCAST); sendHello(BCAST); }
 }
+/* Power / status LED: one slow breath, then dark (saves power, not distracting).
+   Colour = status, peak brightness = time of day (from the hub) x status.
+     green  : on and linked to the hub          (calm: long dark pause)
+     amber  : on, looking for the hub           (shorter pause)
+     blue   : on, never paired with a hub       (shorter pause)
+     cyan   : receiving a firmware update       (continuous slow breath)
+     white  : quick blinks for "identify"                                  */
+float daylight() {                                   // 0 = night, 1 = full day; unknown time -> night (dim)
+  if (hubMins < 0 || millis() - hubMinsAt > 24UL * 3600 * 1000) return 0;
+  int m = (hubMins + (int)((millis() - hubMinsAt) / 60000)) % 1440;
+  const int dawnA = 5 * 60 + 30, dawnB = 7 * 60, duskA = 17 * 60 + 30, duskB = 19 * 60;
+  if (m < dawnA || m >= duskB) return 0;
+  if (m < dawnB) return (float)(m - dawnA) / (dawnB - dawnA);
+  if (m < duskA) return 1;
+  return 1 - (float)(m - duskA) / (duskB - duskA);
+}
 void ledTick() {
-  static uint32_t last = 0; if (millis() - last < 40) return; last = millis();
-  if (millis() < identifyUntil) { bool on = (millis() / 150) % 2; pix.setPixelColor(0, on ? pix.Color(120, 120, 120) : 0); pix.show(); return; }
-  if (!linked) { float ph = (sinf(millis() / 400.0f) + 1) / 2; pix.setPixelColor(0, pix.Color((uint8_t)(20 + ph * 60), (uint8_t)(8 + ph * 25), 0)); }
-  else if (millis() - linkedSince < 20000) pix.setPixelColor(0, pix.Color(0, 25, 0));
-  else pix.setPixelColor(0, 0);
-  pix.show();
+  static uint32_t last = 0; static uint32_t shown = 0xFFFFFFFF;
+  if (millis() - last < 30) return; last = millis();
+  uint32_t c;
+  if (millis() < identifyUntil) {
+    c = ((millis() / 150) % 2) ? pix.Color(90, 90, 90) : 0;
+  } else {
+    uint8_t r, g, b; float boost; uint32_t gap;
+    if (otaActive)      { r = 0;   g = 180; b = 255; boost = 1.0f; gap = 0;    }
+    else if (linked)    { r = 0;   g = 255; b = 40;  boost = 1.0f; gap = 6000; }
+    else if (hasKey)    { r = 255; g = 110; b = 0;   boost = 1.4f; gap = 2500; }
+    else                { r = 0;   g = 60;  b = 255; boost = 1.4f; gap = 2500; }
+    const uint32_t breath = 2600;                    // in + out
+    uint32_t t = millis() % (breath + gap);
+    float lvl = 0;
+    if (t < breath) { float x = (1 - cosf(2 * PI * t / breath)) / 2; lvl = x * x; }   // smooth, eye-friendly curve
+    float peak = (2.5f + daylight() * 15.5f) * boost / 255.0f;   // night ~2.5/255, day ~18/255 (x status boost)
+    float k = lvl * peak;
+    c = pix.Color((uint8_t)(r * k + 0.5f), (uint8_t)(g * k + 0.5f), (uint8_t)(b * k + 0.5f));
+  }
+  if (c != shown) { shown = c; pix.setPixelColor(0, c); pix.show(); }   // only talk to the LED when it changes
 }
 void serialTick() {                                 // USB: "UNPAIR" forgets the hub and key
   static String in;
@@ -354,11 +415,12 @@ void serialTick() {                                 // USB: "UNPAIR" forgets the
 void setup() {
   rxq = xQueueCreate(16, sizeof(RxItem));
   Serial.begin(115200); Serial.setTxTimeoutMs(0);
-  pix.begin(); pix.setBrightness(40); pix.setPixelColor(0, 0); pix.show();
+  pix.begin(); pix.setBrightness(255);   // ledTick() sets the real (low) levels pix.setPixelColor(0, 0); pix.show();
 
   if (!LittleFS.begin(false)) { delay(100); if (!LittleFS.begin(false)) LittleFS.begin(true); }
   configLoad();
   relaysInit();                                   // all OFF, glitch-safe
+  touchInit();
   prefs.begin("leoedge", false);
   if (prefs.getBytes("hub", hubMac, 6) == 6) hubKnown = true;
   if (prefs.getBytes("key", key, 16) == 16) hasKey = true;
@@ -384,6 +446,7 @@ void setup() {
 void loop() {
   esp_task_wdt_reset();
   serialTick();
+  touchTick();
   RxItem it; int n = 0;
   while (n++ < 12 && xQueueReceive(rxq, &it, 0) == pdTRUE) handlePacket(it);
   linkTick();
