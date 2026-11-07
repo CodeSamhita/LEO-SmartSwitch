@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.9.0"
+#define HUB_FW            "1.9.1"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -150,6 +150,9 @@ struct TxResult { uint8_t mac[6]; bool ok; };
 #define HIST_STEP  300
 #define HIST_FILE  "/hist.bin"
 #define HIST_HOURS 168                  // plus hourly averages for 7 days
+#define FINE_SLOTS 360                  // plus one reading every 10 s for the last hour (RAM only, for the 1 h chart)
+struct Fine { uint8_t mac[6]; bool used; uint32_t lastTick; uint16_t v[FINE_SLOTS]; };
+Fine fine[4];
 struct Hist { bool used; uint8_t mac[6]; uint32_t lastSlot; uint32_t accSum; uint16_t accN; uint16_t v[HIST_SLOTS];
               uint32_t lastHour; uint32_t hAccSum; uint16_t hAccN; uint16_t h[HIST_HOURS]; };
 Hist hist[4];
@@ -161,6 +164,7 @@ String hubId;                       // "HUB-XXXXXX"
 String tokens[MAX_TOKENS]; int tokenCount = 0;
 int    loginFails = 0; uint32_t loginLockUntil = 0;
 uint32_t pairingUntil = 0;
+uint8_t  pendingMac[6]; uint32_t pendingAt = 0;   // an unknown device asking to join while adding is closed (shown in the app)
 bool lockManual = false, lockSched = false; int lockFrom = 23 * 60, lockTo = 6 * 60;   // night lock
 
 AsyncWebServer server(80);
@@ -316,7 +320,10 @@ Hist* histFor(const uint8_t* mac, uint32_t createAtSlot) {     // createAtSlot 0
   }
   return nullptr;
 }
-void histDrop(const uint8_t* mac) { Hist* h = histFor(mac, 0); if (h) h->used = false; }
+void histDrop(const uint8_t* mac) {
+  Hist* h = histFor(mac, 0); if (h) h->used = false;
+  for (int j = 0; j < 4; ++j) if (fine[j].used && !memcmp(fine[j].mac, mac, 6)) fine[j].used = false;
+}
 void histSave() {
   File f = LittleFS.open(HIST_FILE, "w"); if (!f) return;
   uint32_t magic = 0x4C484932; f.write((uint8_t*)&magic, 4); f.write((uint8_t*)hist, sizeof(hist)); f.close();
@@ -360,6 +367,19 @@ void histTick() {                       // once a second from loop(): advance sl
       }
     } }
   for (int k = 0; k < n; ++k) { Hist* h = histFor(now[k].mac, slot); if (h) { h->accSum += now[k].v; h->accN++; h->hAccSum += now[k].v; h->hAccN++; } }
+  // 10-second readings for the last hour (gaps stay 0xFFFF)
+  uint32_t tick = (uint32_t)time(nullptr) / 10;
+  for (int f = 0; f < 4; ++f) if (fine[f].used && tick != fine[f].lastTick) {
+    uint32_t gap = tick > fine[f].lastTick ? tick - fine[f].lastTick : FINE_SLOTS;
+    for (uint32_t s = 1; s <= gap && s <= FINE_SLOTS; ++s) fine[f].v[(fine[f].lastTick + s) % FINE_SLOTS] = 0xFFFF;
+    fine[f].lastTick = tick;
+  }
+  for (int k = 0; k < n; ++k) {
+    int f = -1; for (int j = 0; j < 4; ++j) if (fine[j].used && !memcmp(fine[j].mac, now[k].mac, 6)) f = j;
+    if (f < 0) for (int j = 0; j < 4; ++j) if (!fine[j].used) { f = j; fine[j].used = true; memcpy(fine[j].mac, now[k].mac, 6); fine[j].lastTick = tick;
+                                                                for (int s = 0; s < FINE_SLOTS; ++s) fine[j].v[s] = 0xFFFF; break; }
+    if (f >= 0) fine[f].v[tick % FINE_SLOTS] = now[k].v;
+  }
   if (save) histSave();
 }
 
@@ -551,7 +571,12 @@ void handleHello(const RxItem& it) {
     DevGuard g;
     i = findDev(it.mac);
     if (i < 0) {
-      if (!pairingOpen) { static uint32_t lastNag = 0; if (millis() - lastNag > 10000) { lastNag = millis(); dbg("New device " + macStr(it.mac) + " wants to pair - press 'Allow new devices' to accept"); } return; }
+      if (!pairingOpen) {
+        if (!pendingAt || memcmp(pendingMac, it.mac, 6)) stateDirty = true;
+        memcpy(pendingMac, it.mac, 6); pendingAt = millis();
+        static uint32_t lastNag = 0; if (millis() - lastNag > 10000) { lastNag = millis(); dbg("New device " + macStr(it.mac) + " wants to join - press 'Start adding' (Devices) to accept"); }
+        return;
+      }
       for (int k = 0; k < MAX_DEV; ++k) if (!devs[k].used) { i = k; break; }
       if (i < 0) { dbg("Device table full - ignoring " + macStr(it.mac)); return; }
       memset(&devs[i], 0, sizeof(Dev)); devs[i].used = true; memcpy(devs[i].mac, it.mac, 6);
@@ -676,6 +701,8 @@ void wifiEvent(WiFiEvent_t e) {           // WiFi event task: flags only
    Afterwards the setup hotspot has NO password until WiFi is configured again (else you'd be locked out). */
 bool factoryPending = false; bool setupMode = false;
 void hubFactoryReset() {
+  uint32_t red = ledA.Color(160, 0, 0);                  // solid bright red = accepted, wiping now
+  ledA.setPixelColor(0, red); ledA.show(); ledB.setPixelColor(0, red); ledB.show();
   dbg("FACTORY RESET - telling paired devices to forget this hub");
   for (int i = 0; i < MAX_DEV; ++i) {
     bool ok; { DevGuard g; ok = devs[i].used && devs[i].hasKey && devs[i].session; }
@@ -683,15 +710,23 @@ void hubFactoryReset() {
   }
   prefs.clear(); prefs.putBool("setup", true);
   LittleFS.format();
-  delay(200); ESP.restart();
+  delay(1500); ESP.restart();
 }
-#define HUB_RESET_PIN 0                  // BOOT button on the ESP32-S3 board: hold 10 s = factory reset
+/* BOOT button on the ESP32-S3 board held 15 s = factory reset. From 2 s the light blinks red, slow and dim at first,
+   faster and brighter the longer you hold; at 15 s it turns solid bright red (accepted). Let go before 15 s to cancel. */
+#define HUB_RESET_PIN 0
+#define RESET_HOLD_MS 15000
 uint32_t resetHeldSince = 0;
 bool resetArmed() { return resetHeldSince && millis() - resetHeldSince > 2000; }
+uint8_t resetLevel() {
+  float p = constrain((float)(millis() - resetHeldSince - 2000) / (RESET_HOLD_MS - 2000), 0.0f, 1.0f);
+  uint32_t period = 1000 - (uint32_t)(p * 880);          // 1 s -> 0.12 s
+  return (millis() % period) < period / 2 ? (uint8_t)(6 + p * 144) : 0;
+}
 void resetBtnTick() {
   if (digitalRead(HUB_RESET_PIN) != LOW) { resetHeldSince = 0; return; }
   if (!resetHeldSince) resetHeldSince = millis();
-  if (millis() - resetHeldSince >= 10000) { resetHeldSince = 0; factoryPending = true; }
+  if (millis() - resetHeldSince >= RESET_HOLD_MS) { resetHeldSince = 0; factoryPending = true; }
 }
 String apSsid() { return "LEO-Hub-" + hubId.substring(4); }
 void apStart() {
@@ -734,6 +769,7 @@ String stateJson() {
   JsonObject h = d["hub"].to<JsonObject>();
   h["name"] = hubName; h["id"] = hubId; h["fw"] = HUB_FW;
   h["room"] = roomLight == 1 ? "bright" : roomLight == 0 ? "dark" : "unknown";
+  if (pendingAt && millis() - pendingAt < 30000) h["pending"] = macStr(pendingMac);   // asking to join in the last 30 s
   h["wifi"] = (WiFi.status() == WL_CONNECTED); h["ip"] = WiFi.localIP().toString();
   h["ap"] = apUp ? apSsid() : String("");
   h["passwordSet"] = pwHash.length() > 0;
@@ -892,9 +928,15 @@ static const char INDEX_HTML[] PROGMEM =
   "\n"
   "  <section class=\"page\" id=\"p-devices\">\n"
   "    <div class=\"card\" style=\"margin-bottom:12px\">\n"
-  "      <b>Add a new device</b>\n"
-  "      <p class=\"note\">For security the hub only accepts new devices while pairing is open. Press the button, then power the new device on near the hub.</p>\n"
-  "      <div class=\"row\"><button class=\"btn p\" id=\"pairbtn\" onclick=\"openPairing()\">Allow new devices for 2 minutes</button></div>\n"
+  "      <b>Add a device</b>\n"
+  "      <ol class=\"note\" style=\"padding-left:18px;margin:8px 0\">\n"
+  "        <li>The device needs LEO firmware once, over USB (<b>LEO_SwitchEdge</b> or <b>LEO_TankEdge</b> — see the setup guide in docs/setup.md). A device that was used before: factory-reset it first (hold its BOOT button 15 s).</li>\n"
+  "        <li>Press <b>Start adding</b> below — the hub accepts new devices for 2 minutes.</li>\n"
+  "        <li>Power the device on within a few metres of the hub. Its light breathes <b>blue</b> while it looks for a hub.</li>\n"
+  "        <li>Within seconds it appears in the list below with 🔒 secured, and its light turns to a calm <b>green</b> breath. Give it a name.</li>\n"
+  "      </ol>\n"
+  "      <div class=\"row\"><button class=\"btn p\" id=\"pairbtn\" onclick=\"openPairing()\">Start adding (2 minutes)</button></div>\n"
+  "      <div class=\"note\" id=\"pairmsg\" style=\"margin-top:6px\"></div>\n"
   "    </div>\n"
   "    <div id=\"devlist\"></div>\n"
   "  </section>\n"
@@ -947,7 +989,7 @@ static const char INDEX_HTML[] PROGMEM =
   "      <div class=\"switchrow\" style=\"margin-top:14px\"><span><b>Live log</b></span><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"clearConsole()\">Clear</button></div>\n"
   "      <div class=\"logbox\" id=\"log\" style=\"margin-top:8px\">Connecting…</div>\n"
   "      <div class=\"row\" style=\"margin-top:16px\"><button class=\"btn d\" onclick=\"hubFactory()\">Factory reset the hub…</button></div>\n"
-  "      <p class=\"note\">Erases WiFi, password, devices, names and logs. Paired devices are told to forget the hub. Afterwards join the hotspot <b>LEO-Hub-…</b> (no password) and open 192.168.4.1 to set WiFi again. Also possible by holding the hub's <b>BOOT</b> button for 10 seconds (its light blinks red after 2 s).</p>\n"
+  "      <p class=\"note\">Erases WiFi, password, devices, names and logs. Paired devices are told to forget the hub. Afterwards join the hotspot <b>LEO-Hub-…</b> (no password) and open 192.168.4.1 to set WiFi again. Also possible by holding the hub's <b>BOOT</b> button for 15 seconds (from 2 s its light blinks red, faster and brighter; solid red = accepted).</p>\n"
   "    </details>\n"
   "  </section>\n"
   "\n"
@@ -998,13 +1040,24 @@ static const char INDEX_HTML[] PROGMEM =
   "async function logout(){await post('/api/logout');location.reload()}\n"
   "\n"
   "/* live state */\n"
+  "/* stays live: retries until the hub answers, reconnects when updates stop (hub pushes at least every 2 s)\n"
+  "   or when you come back to the page, and skips redraws when nothing changed (no lost taps) */\n"
+  "let lastMsg=0,lastData='',connecting=false,retryT=null;\n"
+  "function liveState(ok){const w=$('#wifiTxt');if(w&&!ok)w.textContent='Reconnecting…';$('#wifiDot').className='dot '+(ok?((S.hub||{}).wifi?'on':'off'):'off')}\n"
   "async function connect(){\n"
-  "  const st=await call('/api/state');if(!st)return;          // 401 shows the login screen\n"
-  "  try{S=await st.json();render()}catch(e){}\n"
-  "  if(sock){sock.onclose=null;sock.close()}\n"
-  "  const ws=new WebSocket('ws://'+location.host+'/ws');sock=ws;\n"
-  "  ws.onmessage=e=>{try{S=JSON.parse(e.data);render()}catch(_){}};\n"
-  "  ws.onclose=()=>{if(sock===ws)setTimeout(connect,2000)}}\n"
+  "  if(connecting)return;connecting=true;clearTimeout(retryT);\n"
+  "  try{\n"
+  "    const st=await call('/api/state');\n"
+  "    if(!st){if(!$('#login').classList.contains('show'))retryT=setTimeout(connect,2000);liveState(false);return}   // 401 shows the login screen\n"
+  "    try{const txt=await st.text();lastData=txt;S=JSON.parse(txt);render()}catch(e){}\n"
+  "    if(sock){sock.onclose=null;try{sock.close()}catch(_){}}\n"
+  "    const ws=new WebSocket('ws://'+location.host+'/ws');sock=ws;lastMsg=Date.now();\n"
+  "    ws.onmessage=e=>{lastMsg=Date.now();if(e.data===lastData)return;lastData=e.data;try{S=JSON.parse(e.data);render()}catch(_){}};\n"
+  "    ws.onclose=()=>{if(sock===ws){liveState(false);retryT=setTimeout(connect,1500)}};\n"
+  "  }finally{connecting=false}}\n"
+  "setInterval(()=>{if(sock&&Date.now()-lastMsg>7000&&!connecting){liveState(false);connect()}},2000);\n"
+  "document.addEventListener('visibilitychange',()=>{if(!document.hidden&&Date.now()-lastMsg>3000)connect()});\n"
+  "window.addEventListener('online',()=>connect());\n"
   "function nav(p){page=p;$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
   "  $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));\n"
   "  if(p==='devices'){devKeys='';render()} if(p==='hub'){loadHub();logOn()}else logOff(); if(p==='activity')loadActivity();\n"
@@ -1017,9 +1070,11 @@ static const char INDEX_HTML[] PROGMEM =
   "  let b='';const L=h.lock||{};\n"
   "  if(L.active)b+=`<div class=\"banner\"><b>🌙 Night lock is on — lights can't be switched ON${L.manual?'':(' until '+esc(L.to))}.</b>${L.manual?'<button class=\"btn\" onclick=\"setLock({manual:false})\">Unlock</button>':''}</div>`;\n"
   "  if(h.passwordSet===false)b+=`<div class=\"banner\"><b>⚠ No hub password yet — anyone on your WiFi can control your devices.</b><button class=\"btn\" onclick=\"nav('hub')\">Set one</button></div>`;\n"
-  "  if(h.pairing>0)b+=`<div class=\"banner info\"><b>Pairing open for ${h.pairing}s — power on the new device near the hub.</b></div>`;\n"
+  "  if(h.pairing>0)b+=`<div class=\"banner info\"><b>Adding devices for ${h.pairing}s more — power on the new device near the hub.</b><button class=\"btn\" onclick=\"post('/api/pairing',{secs:0})\">Stop</button></div>`;\n"
+  "  else if(h.pending)b+=`<div class=\"banner info\"><b>A new device (${esc(h.pending)}) is asking to join.</b><button class=\"btn p\" onclick=\"openPairing()\">Allow</button></div>`;\n"
   "  $('#banners').innerHTML=b;\n"
-  "  const pb=$('#pairbtn');if(pb)pb.textContent=h.pairing>0?('Pairing open — '+h.pairing+'s left'):'Allow new devices for 2 minutes';\n"
+  "  const pb=$('#pairbtn');if(pb)pb.textContent=h.pairing>0?('Waiting for the new device… '+h.pairing+'s'):'Start adding (2 minutes)';\n"
+  "  const pm=$('#pairmsg');if(pm){if(h.pairing>0&&pairBase){const nw=S.devices.filter(d=>!pairBase.includes(d.mac));pm.innerHTML=nw.length?('✅ Added: '+nw.map(d=>'<b>'+esc(d.name)+'</b>').join(', ')):'Looking for new devices…'}else if(!h.pairing)pairBase=null}\n"
   "  if(page==='home')renderHome();\n"
   "  if(page==='devices')renderDevices();\n"
   "  if(page==='hub')renderLock();\n"
@@ -1040,9 +1095,9 @@ static const char INDEX_HTML[] PROGMEM =
   "        ${rel||'<div class=\"meta\">Waiting for relay info…</div>'}\n"
   "        <div class=\"row\"><button class=\"btn\" ${d.online?'':'disabled'} onclick=\"cmd('${d.mac}',2,{val:1})\">All on</button><button class=\"btn\" ${d.online?'':'disabled'} onclick=\"cmd('${d.mac}',2,{val:0})\">All off</button></div>\n"
   "        <div class=\"meta\" style=\"margin-top:8px\">${meta}</div></div>`}\n"
-  "    if(d.type==='tank'){const t=d.tank||{};const segs=[...Array(9)].map((_,i)=>`<div class=\"seg ${i<(t.leds||0)?'on':''}\"></div>`).join('');\n"
+  "    if(d.type==='tank'){const t=d.tank||{};\n"
   "      return `<div class=\"card click ${d.online?'':'offline'}\" onclick=\"openTank('${d.mac}')\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span><span class=\"chev\">›</span></div>\n"
-  "        <div class=\"tank\"><div class=\"tankbar\">${segs}</div><div><div class=\"big\">${t.sensorOk===false?'—':Math.round(t.level||0)}<small>%</small></div>\n"
+  "        <div class=\"tank\">${tankBar(d)}<div><div class=\"big\">${t.sensorOk===false?'—':Math.round(t.level||0)}<small>%</small></div>\n"
   "        <div class=\"meta\" style=\"margin-top:6px\">${t.sensorOk===false?'<span class=\"err\">Sensor error</span>':('Water distance '+(t.dist||0).toFixed(1)+' cm')}</div>\n"
   "        <div class=\"meta\">${esc(t.stateTxt||'')}</div>${t.ldr!==undefined?`<div class=\"meta\">Room light: ${esc(S.hub.room||'')} (${t.ldr})</div>`:''}</div></div>\n"
   "        <div class=\"meta\" style=\"margin-top:8px\">${meta}</div></div>`}\n"
@@ -1050,7 +1105,8 @@ static const char INDEX_HTML[] PROGMEM =
   "}\n"
   "async function tog(el,mac,i,on){el.classList.toggle('on',on);if(!await cmd(mac,1,{idx:i,val:on?1:0}))el.classList.toggle('on',!on)}\n"
   "async function everything(on){for(const d of S.devices)if(d.type==='switch'&&d.online)await cmd(d.mac,2,{val:on?1:0})}\n"
-  "async function openPairing(){if(await post('/api/pairing',{secs:120}))toast('Pairing open for 2 minutes')}\n"
+  "let pairBase=null;\n"
+  "async function openPairing(){pairBase=S.devices.map(d=>d.mac);if(await post('/api/pairing',{secs:120}))toast('Adding devices for 2 minutes — power the new one on now')}\n"
   "\n"
   "/* devices page: rebuilt only when the device set changes, so typing isn't clobbered */\n"
   "function renderDevices(){\n"
@@ -1064,7 +1120,7 @@ static const char INDEX_HTML[] PROGMEM =
   "        <div class=\"row\" style=\"margin:0\"><input value=\"${esc(r.name)}\" data-r=\"${i}n\"><input type=\"number\" value=\"${r.watts}\" style=\"flex:0 0 90px\" data-r=\"${i}w\">\n"
   "        <button class=\"btn\" style=\"flex:0 0 70px\" onclick=\"relMeta('${d.mac}',${i},this)\">Save</button></div>`).join(''):''}\n"
   "      ${d.type==='switch'&&d.touch!==undefined?`<label>Touch buttons on the switch (GPIO 4–7)</label><div class=\"row\" style=\"margin:0\"><button class=\"btn ${d.touch?'p':''}\" onclick=\"cmd('${d.mac}',9,{val:${d.touch?0:1}})\">${d.touch?'Enabled — tap to disable':'Disabled — tap to enable'}</button></div>`:''}\n"
-  "      <div class=\"row\"><button class=\"btn\" onclick=\"cmd('${d.mac}',3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart this device?'))cmd('${d.mac}',6)\">Restart</button><button class=\"btn d\" onclick=\"forget('${d.mac}')\">Forget</button></div>\n"
+  "      <div class=\"row\"><button class=\"btn\" onclick=\"cmd('${d.mac}',3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart this device?'))cmd('${d.mac}',6)\">Restart</button><button class=\"btn d\" onclick=\"forget('${d.mac}')\">Remove device</button></div>\n"
   "      <label>Update this device's firmware — choose its .bin</label><input type=\"file\" accept=\".bin\" data-k=\"bin\">\n"
   "      <div class=\"row\"><button class=\"btn p\" onclick=\"edgeOta('${d.mac}',this)\">Upload &amp; install</button></div>\n"
   "      <div class=\"bar\"><i data-k=\"bar\"></i></div><div class=\"note\" data-k=\"otamsg\"></div>\n"
@@ -1076,7 +1132,9 @@ static const char INDEX_HTML[] PROGMEM =
   "}\n"
   "async function rename(mac,btn){const v=btn.parentElement.querySelector('input').value.trim();if(v)await cmd(mac,4,{text:v})}\n"
   "async function relMeta(mac,i,btn){const p=btn.parentElement;await cmd(mac,5,{idx:i,text:p.querySelector('[data-r=\"'+i+'n\"]').value.trim(),f:parseFloat(p.querySelector('[data-r=\"'+i+'w\"]').value)||0})}\n"
-  "async function forget(mac){if(confirm('Forget this device?\\n\\nIf it is online it is told to unpair too. To add it again later, use \"Allow new devices\".')){await post('/api/forget',{mac});devKeys=''}}\n"
+  "async function forget(mac){const d=S.devices.find(x=>x.mac===mac)||{};\n"
+  "  if(!confirm('Remove \"'+(d.name||mac)+'\" from the hub?\\n\\n'+(d.online?'It is online, so it is also told to forget this hub and goes back to \"looking for a hub\" (blue light).':'It is OFFLINE: before adding it again later, factory-reset it (hold its BOOT button 15 s).')+'\\n\\nIts history and settings on the hub are deleted; settings stored on the device itself are kept.'))return;\n"
+  "  if(await post('/api/forget',{mac})){devKeys='';toast('Device removed');if(page!=='devices')nav('devices')}}\n"
   "function upload(url,file,bar,msg,done){\n"
   "  const fd=new FormData();fd.append('firmware',file,file.name);const x=new XMLHttpRequest();x.open('POST',url);\n"
   "  x.upload.onprogress=e=>{if(e.lengthComputable){bar.style.width=Math.round(e.loaded*100/e.total)+'%';msg.textContent='Uploading to hub… '+Math.round(e.loaded*100/e.total)+'%'}};\n"
@@ -1142,7 +1200,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function ledCol(c,i,n){if(c&&c.palette==2&&c.colors&&c.colors[i])return c.colors[i];const t=n>1?i/(n-1):1,r=Math.round(255*(1-t)),v=Math.round(255*t);\n"
   "  return c&&c.palette==1?`rgb(${r},${v},0)`:`rgb(${r},0,${v})`}\n"
   "function tankBar(d,h){const t=d.tank||{},c=t.cfg,n=c?(c.ledCount||7):9,ok=t.sensorOk!==false,lit=ok?Math.round((t.level||0)*n/100):0;\n"
-  "  return `<div class=\"tankbar\" style=\"${h?'height:'+h+'px':''}\">${[...Array(n)].map((_,i)=>`<div class=\"seg\" style=\"${!ok?'background:#d9a400;opacity:.85':i<lit?'background:'+ledCol(c,i,n):''}\"></div>`).join('')}</div>`}\n"
+  "  return `<div class=\"tankbar\" style=\"${h?'height:'+h+'px':''}\">${[...Array(n)].map((_,i)=>`<div class=\"seg\" style=\"${!ok?'background:#d9a400;opacity:.85':i<lit?'background:'+ledCol(c,i,n)+(i===lit-1?';filter:brightness(1.25);box-shadow:0 0 6px '+ledCol(c,i,n):';filter:brightness(.9)'):''}\"></div>`).join('')}</div>`}\n"
   "const SNDS=['Chirp','Short beeps','Long beeps','Triple beep','Siren','LEDs only'],FLCOL=['No flash','Green','Red','Blue','White','Amber'];\n"
   "function opts(list,v){return list.map((x,i)=>`<option value=\"${i}\" ${i==v?'selected':''}>${x}</option>`).join('')}\n"
   "function renderTank(){  const d=tankDev();if(!d){nav('home');return}\n"
@@ -1180,7 +1238,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    ${c.rules?c.rules.map((r,i)=>`<div style=\"padding:8px 0;border-bottom:1px dashed #1e2731\" data-rule=\"${i}\">\n"
   "      <div class=\"switchrow\" style=\"margin:0\"><span><b>Rule ${i+1}</b></span><button class=\"tgl ${r[0]?'on':''}\" data-k=\"on\" onclick=\"this.classList.toggle('on')\"></button></div>\n"
   "      <div class=\"row\" style=\"margin-top:6px\"><select data-k=\"dir\">${opts(['When level rises to','When level drops to'],r[2])}</select><input data-k=\"level\" type=\"number\" min=\"0\" max=\"100\" value=\"${r[1]}\" style=\"flex:0 0 74px\"><span class=\"meta\" style=\"flex:0 0 auto;align-self:center\">%</span></div>\n"
-  "      <div class=\"row\" style=\"margin-top:6px\"><select data-k=\"pattern\">${opts(SNDS,r[3])}</select><input data-k=\"repeats\" type=\"number\" min=\"1\" max=\"30\" value=\"${r[4]}\" style=\"flex:0 0 64px\" title=\"Times\"><span class=\"meta\" style=\"flex:0 0 auto;align-self:center\">times</span></div>\n"
+  "      <div class=\"row\" style=\"margin-top:6px\"><select data-k=\"pattern\">${opts(SNDS,r[3])}</select><input data-k=\"repeats\" type=\"number\" min=\"1\" max=\"30\" value=\"${r[4]||1}\" style=\"flex:0 0 64px\" title=\"Times\"><span class=\"meta\" style=\"flex:0 0 auto;align-self:center\">times</span></div>\n"
   "      <div class=\"row\" style=\"margin-top:6px\"><select data-k=\"color\">${opts(FLCOL,r[5])}</select><button class=\"btn\" style=\"flex:0 0 70px\" onclick=\"testRule(${i})\">Test</button><button class=\"btn p\" style=\"flex:0 0 70px\" onclick=\"saveRule(${i})\">Save</button></div></div>`).join('')\n"
   "      :'<div class=\"meta\">Alarm rules need tank firmware 1.7 or newer.</div>'}\n"
   "    <label style=\"margin-top:12px\">Status labels${q('Only for the status text: the tank is shown as \"Full\" at or above the first value and \"Low\" at or below the second. Alarms come from the rules above.')}</label>\n"
@@ -1197,7 +1255,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"row\" style=\"margin:0\"><button class=\"btn ${c.palette==0?'p':''}\" onclick=\"tset(8,0)\">Red → Blue</button><button class=\"btn ${c.palette==1?'p':''}\" onclick=\"tset(8,1)\">Red → Green</button>${c.colors?`<button class=\"btn ${c.palette==2?'p':''}\" onclick=\"tset(8,2)\">Custom</button>`:''}</div>\n"
   "    ${c.palette==2&&c.colors?`<div style=\"margin-top:10px\">${c.colors.slice(0,c.ledCount||7).map((col,i)=>`<div class=\"switchrow\" style=\"margin:4px 0\"><span>LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
   "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).reverse().join('')}\n"
-  "      <div class=\"row\"><button class=\"btn p\" onclick=\"saveColors()\">Save colours</button></div>\n"
+  "      <div class=\"row\"><button class=\"btn\" onclick=\"presetColors()\">Preset: Red · greens · Blue</button><button class=\"btn p\" onclick=\"saveColors()\">Save colours</button></div>\n"
   "      <p class=\"note\">LED 1 is the bottom of the strip. Only LEDs that are lit for the current level show their colour.</p></div>`:''}\n"
   "    <label>LEDs used to show the level${q('How many LEDs, counted from the bottom of the strip, show the water level (1 to 8). A full tank lights all of them. The top LED is always the small status light.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tLeds\" type=\"number\" min=\"1\" max=\"8\" value=\"${c.ledCount||7}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveLeds()\">Save</button></div>\n"
@@ -1211,7 +1269,8 @@ static const char INDEX_HTML[] PROGMEM =
   "  <div class=\"card\">\n"
   "    <label>Name${q('The name shown in the app and in the Activity log.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tName\" value=\"${esc(d.name)}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"tankRename()\">Save</button></div>\n"
-  "    <div class=\"row\"><button class=\"btn\" onclick=\"if(confirm('Restart the tank monitor?'))cmd(tankMac,6)\">Restart</button><button class=\"btn\" onclick=\"nav('devices')\">Update / forget…</button></div>\n"
+  "    <div class=\"row\"><button class=\"btn\" onclick=\"if(confirm('Restart the tank monitor?'))cmd(tankMac,6)\">Restart</button><button class=\"btn\" onclick=\"nav('devices')\">Update firmware…</button></div>\n"
+  "    <div class=\"row\"><button class=\"btn d\" onclick=\"forget(tankMac)\">Remove device…</button></div>\n"
   "  </div>`;\n"
   "}\n"
   "function useNow(sel){const t=(tankDev()||{}).tank||{};if(t.sensorOk===false){toast('No sensor reading right now');return}$(sel).value=(t.dist||0).toFixed(1)}\n"
@@ -1232,6 +1291,11 @@ static const char INDEX_HTML[] PROGMEM =
   "  const ok=fp>c.fullPct?(await tset(3,fp)&&await tset(4,lp)):(await tset(4,lp)&&await tset(3,fp));\n"
   "  m.textContent=ok?'Sent — the tank confirms by showing the new values.':'Could not reach the hub.'}\n"
   "async function saveQuiet(){if(await tset(6,$('#tQf').value)&&await tset(7,$('#tQt').value))toast('Quiet hours sent')}\n"
+  "/* preset: bottom LED red (low), top LED blue (high), the ones between fade amber -> greens (fills the pickers; press Save) */\n"
+  "function presetColors(){const els=[...document.querySelectorAll('#tset input[data-led]')].sort((a,b)=>a.dataset.led-b.dataset.led),n=els.length;\n"
+  "  const stops=[[212,167,44],[150,190,60],[85,150,45],[110,220,120]],mix=(a,b,f)=>a.map((x,k)=>Math.round(x+(b[k]-x)*f)),hex=c=>'#'+c.map(x=>x.toString(16).padStart(2,'0')).join('');\n"
+  "  els.forEach((el,i)=>{let c;if(i===0)c=[229,57,53];else if(i===n-1&&n>1)c=[47,59,255];else{const f=n>3?(i-1)/(n-3):0,p=f*(stops.length-1),k=Math.min(Math.floor(p),stops.length-2);c=mix(stops[k],stops[k+1],p-k)}el.value=hex(c)});\n"
+  "  toast('Preset filled in — press Save colours')}\n"
   "async function saveColors(){let n=0;for(const el of document.querySelectorAll('#tset input[data-led]')){if(el.value===el.dataset.was)continue;\n"
   "    if(!await tset(13+(+el.dataset.led),parseInt(el.value.slice(1),16)))return toast('Could not reach the hub');n++}\n"
   "  toast(n?n+' colour'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
@@ -1280,7 +1344,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    <label>Name${q('The name shown in the app and in the Activity log.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"swName\" value=\"${esc(d.name)}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"swRename()\">Save</button></div>\n"
   "    <div class=\"row\"><button class=\"btn\" onclick=\"cmd(swMac,3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart the switch? All relays turn OFF.'))cmd(swMac,6)\">Restart</button></div>\n"
-  "    <div class=\"row\"><button class=\"btn\" onclick=\"nav('devices')\">Update / forget…</button></div>\n"
+  "    <div class=\"row\"><button class=\"btn\" onclick=\"nav('devices')\">Update firmware…</button><button class=\"btn d\" onclick=\"forget(swMac)\">Remove device…</button></div>\n"
   "    <p class=\"note\">Identify flashes the switch's LED so you can find it. Restart turns every relay off.</p>\n"
   "  </div>`;\n"
   "}\n"
@@ -1292,38 +1356,58 @@ static const char INDEX_HTML[] PROGMEM =
   "function pageExtras(kind){\n"
   "  const mac=kind==='tank'?tankMac:swMac,box=kind==='tank'?'#tchart':'#swchart',det=kind==='tank'?'#tadvd':'#swadvd';\n"
   "  const go=()=>{if(page===kind)loadChart(mac,box,kind==='tank'?'%':'W')};\n"
-  "  go();clearInterval(chartTimer);chartTimer=setInterval(go,60000);\n"
+  "  go();clearInterval(chartTimer);chartTimer=setInterval(go,20000);\n"
   "  const d=$(det);if(d)d.open=false;\n"
   "}\n"
   "function hm(t){return String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0')}\n"
   "let chartRange='day';\n"
   "function setRange(r){chartRange=r;pageExtras(page)}\n"
+  "function hms(t){return hm(t)+':'+String(t.getSeconds()).padStart(2,'0')}\n"
   "async function loadChart(mac,box,unit){\n"
   "  const el=$(box);if(!el)return;\n"
-  "  const week=chartRange!=='day';\n"
-  "  const h=await jget('/api/history?mac='+encodeURIComponent(mac)+(week?'&range=week':''));\n"
-  "  const btns=`<div class=\"row\" style=\"margin:0 0 8px\">${[['day','24 h'],['yday','Yesterday'],['week','7 days']].map(([k,l])=>`<button class=\"btn ${chartRange===k?'p':''}\" style=\"padding:6px\" onclick=\"setRange('${k}')\">${l}</button>`).join('')}</div>`;\n"
-  "  if(!h||!h.end){el.innerHTML=btns+'<div class=\"meta\">No history yet — the hub records a point every 5 minutes (hourly for 7 days).</div>';return}\n"
+  "  const week=chartRange==='yday'||chartRange==='week',fineR=chartRange==='h1';\n"
+  "  const h=await jget('/api/history?mac='+encodeURIComponent(mac)+(week?'&range=week':fineR?'&range=fine':''));\n"
+  "  const btns=`<div class=\"row\" style=\"margin:0 0 8px;gap:6px\">${[['h1','1 h'],['h6','6 h'],['day','24 h'],['yday','Yesterday'],['week','7 days']].map(([k,l])=>`<button class=\"btn ${chartRange===k?'p':''}\" style=\"padding:6px\" onclick=\"setRange('${k}')\">${l}</button>`).join('')}</div>`;\n"
+  "  if(!h||!h.end){el.innerHTML=btns+'<div class=\"meta\">No history yet — the hub records a reading every 10 s (1 h), every 5 minutes (24 h) and every hour (7 days).</div>';return}\n"
   "  const step=h.step*1000,endMs=h.end*1000;let v=h.v.map(x=>x==null?null:(unit==='%'?x/10:x)),t0=endMs-(v.length-1)*step;\n"
   "  if(chartRange==='yday'){const d=new Date();d.setHours(0,0,0,0);const a=d.getTime()-864e5,b=d.getTime();\n"
   "    const out=[];for(let i=0;i<v.length;i++){const ts=t0+i*step;if(ts>=a&&ts<b)out.push(v[i])}v=out;t0=a;\n"
   "    while(v.length<24)v.push(null)}\n"
+  "  if(chartRange==='h6'){v=v.slice(-72);t0=endMs-(v.length-1)*step}\n"
+  "  if(!week){const dv=S.devices.find(x=>x.mac===mac);if(dv&&dv.online){const live=unit==='%'?((dv.tank||{}).sensorOk!==false?(dv.tank||{}).level:null):totalW(dv);if(live!=null)v[v.length-1]=live}}   // last point = live value\n"
   "  const pts=v.filter(x=>x!=null),n=v.length;\n"
   "  if(!pts.length){el.innerHTML=btns+'<div class=\"meta\">No readings for this period yet.</div>';return}\n"
-  "  const W=320,H=140,pl=30,pr=8,pt=8,pb=18,max=unit==='%'?100:Math.max(10,...pts)*1.15;\n"
-  "  const X=i=>pl+(W-pl-pr)*i/Math.max(1,n-1),Y=y=>pt+(H-pt-pb)*(1-y/max);\n"
+  "  // y-axis: fixed 0-100 % / 0-peak W for long views; fitted to the data for 1 h and 6 h so small changes are visible\n"
+  "  let lo=0,hi=unit==='%'?100:Math.max(10,...pts)*1.15;\n"
+  "  if(chartRange==='h1'||chartRange==='h6'){const mn=Math.min(...pts),mx=Math.max(...pts),span=Math.max(mx-mn,unit==='%'?2:10);\n"
+  "    lo=Math.max(0,mn-span*0.2);hi=mx+span*0.2;if(unit==='%')hi=Math.min(hi,Math.max(100,mx));}\n"
+  "  const W=320,H=140,pl=34,pr=8,pt=8,pb=18;\n"
+  "  const X=i=>pl+(W-pl-pr)*i/Math.max(1,n-1),Y=y=>pt+(H-pt-pb)*(1-(y-lo)/(hi-lo||1));\n"
   "  let path='',pen=false;v.forEach((y,i)=>{if(y==null){pen=false;return}path+=(pen?'L':'M')+X(i).toFixed(1)+' '+Y(y).toFixed(1)+' ';pen=true});\n"
   "  if(pts.length===1){const i=v.findIndex(x=>x!=null);path+=`M${(X(i)-1.5).toFixed(1)} ${Y(v[i]).toFixed(1)} L${(X(i)+1.5).toFixed(1)} ${Y(v[i]).toFixed(1)}`}\n"
-  "  let g='';[0,.5,1].forEach(f=>{const y=Y(max*f);g+=`<line x1=\"${pl}\" x2=\"${W-pr}\" y1=\"${y}\" y2=\"${y}\" stroke=\"#25303a\"/><text x=\"${pl-4}\" y=\"${y+3}\" fill=\"#7d8b97\" font-size=\"9\" text-anchor=\"end\">${Math.round(max*f)}</text>`});\n"
+  "  const dec=(hi-lo)<10?1:0,fmt=x=>x.toFixed(dec);\n"
+  "  let g='';[0,.5,1].forEach(f=>{const val=lo+(hi-lo)*f,y=Y(val);g+=`<line x1=\"${pl}\" x2=\"${W-pr}\" y1=\"${y}\" y2=\"${y}\" stroke=\"#25303a\"/><text x=\"${pl-4}\" y=\"${y+3}\" fill=\"#7d8b97\" font-size=\"9\" text-anchor=\"end\">${fmt(val)}</text>`});\n"
   "  const lbl=(i,txt,anc)=>`<text x=\"${X(i)}\" y=\"${H-4}\" fill=\"#7d8b97\" font-size=\"9\" text-anchor=\"${anc||'middle'}\">${txt}</text>`;\n"
   "  if(chartRange==='day')[18,12,6,0].forEach(hh=>{g+=lbl(n-1-hh*12,hh?hm(new Date(endMs-hh*3600e3)):'now',hh?'middle':'end')});\n"
+  "  else if(chartRange==='h1'||chartRange==='h6'){const parts=4;for(let k=parts;k>=0;k--){const i=Math.round((n-1)*(parts-k)/parts);g+=lbl(i,k?hm(new Date(t0+i*step)):'now',k===parts?'start':k?'middle':'end')}}\n"
   "  else if(chartRange==='yday')[0,6,12,18].forEach(hh=>{g+=lbl(hh,String(hh).padStart(2,'0')+':00',hh?'middle':'start')});\n"
   "  else for(let dd=6;dd>=0;dd--){const i=n-1-dd*24;if(i<0)continue;g+=lbl(i,dd?new Date(endMs-dd*864e5).toLocaleDateString([], {weekday:'short'}):'now',dd?'middle':'end')}\n"
-  "  const last=pts[pts.length-1],col=unit==='%'?'var(--water)':'var(--warn)',hrsPer=h.step/3600;\n"
-  "  const foot=unit==='%'?`${chartRange==='day'?'Now '+last.toFixed(0)+' % · ':''}lowest ${Math.min(...pts).toFixed(0)} % · highest ${Math.max(...pts).toFixed(0)} %`\n"
-  "    :`Energy: ${(v.reduce((a,x)=>a+(x||0),0)*hrsPer/1000).toFixed(2)} kWh · peak ${Math.round(Math.max(...pts))} W`;\n"
-  "  el.innerHTML=btns+`<svg viewBox=\"0 0 ${W} ${H}\" width=\"100%\" style=\"display:block\">${g}<path d=\"${path}\" fill=\"none\" stroke=\"${col}\" stroke-width=\"1.8\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/></svg>\n"
-  "    <div class=\"meta\" style=\"margin-top:4px\">${foot}${q(unit==='%'?'Water level averaged per 5 minutes (24 h) or per hour (Yesterday, 7 days). Gaps mean the tank was offline or had no sensor reading.':'Power averaged per 5 minutes (24 h) or per hour (Yesterday, 7 days), from the watts you set for each relay. Energy is an estimate, not a meter reading.')}</div>`;\n"
+  "  const last=pts[pts.length-1],col=unit==='%'?'var(--water)':'var(--warn)',hrsPer=h.step/3600,u=unit==='%'?' %':' W';\n"
+  "  const foot=unit==='%'?`${!week?'Now '+last.toFixed(1)+' % · ':''}lowest ${Math.min(...pts).toFixed(1)} % · highest ${Math.max(...pts).toFixed(1)} %`\n"
+  "    :`${!week?'Now '+Math.round(last)+' W · ':''}energy ${(v.reduce((a,x)=>a+(x||0),0)*hrsPer/1000).toFixed(3)} kWh · peak ${Math.round(Math.max(...pts))} W`;\n"
+  "  const res=fineR?'every 10 s':week?'hourly averages':'5-minute averages';\n"
+  "  el.innerHTML=btns+`<svg viewBox=\"0 0 ${W} ${H}\" width=\"100%\" style=\"display:block;touch-action:pan-y\">${g}<path d=\"${path}\" fill=\"none\" stroke=\"${col}\" stroke-width=\"1.8\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>\n"
+  "    <line class=\"cx\" y1=\"${pt}\" y2=\"${H-pb}\" stroke=\"#7d8b97\" stroke-dasharray=\"2 2\" visibility=\"hidden\"/><circle class=\"cd\" r=\"3\" fill=\"${col}\" visibility=\"hidden\"/></svg>\n"
+  "    <div class=\"meta\" data-k=\"tip\" style=\"min-height:15px;margin-top:2px;color:var(--txt)\">Tap or hover the chart for exact values · ${res}</div>\n"
+  "    <div class=\"meta\" style=\"margin-top:2px\">${foot}${q(unit==='%'?'Water level: a reading every 10 s for 1 h, 5-minute averages for 6 h and 24 h, hourly averages for Yesterday and 7 days. The 1 h and 6 h views zoom the scale to the data. Gaps mean the tank was offline or had no sensor reading.':'Power from the watts you set for each relay: every 10 s for 1 h, 5-minute averages for 6 h and 24 h, hourly averages for Yesterday and 7 days. Energy is an estimate, not a meter reading.')}</div>`;\n"
+  "  // tap / hover: exact value and time at that point\n"
+  "  const svg=el.querySelector('svg'),cx=svg.querySelector('.cx'),cd=svg.querySelector('.cd'),tip=el.querySelector('[data-k=tip]');\n"
+  "  const show=e=>{const r=svg.getBoundingClientRect(),x=(e.clientX-r.left)*W/r.width;let i=Math.round((x-pl)/((W-pl-pr)/Math.max(1,n-1)));i=Math.max(0,Math.min(n-1,i));\n"
+  "    let j=i;for(let d=0;d<n&&v[j]==null;d++){if(i+d<n&&v[i+d]!=null){j=i+d;break}if(i-d>=0&&v[i-d]!=null){j=i-d;break}}\n"
+  "    if(v[j]==null)return;const t=new Date(t0+j*step);\n"
+  "    cx.setAttribute('x1',X(j));cx.setAttribute('x2',X(j));cx.setAttribute('visibility','visible');cd.setAttribute('cx',X(j));cd.setAttribute('cy',Y(v[j]));cd.setAttribute('visibility','visible');\n"
+  "    tip.textContent=(week?t.toLocaleDateString([], {weekday:'short',day:'numeric'})+' '+hm(t):fineR?hms(t):hm(t))+' · '+(unit==='%'?v[j].toFixed(1):Math.round(v[j]))+u+(j===n-1&&!week?' (now)':'')};\n"
+  "  svg.addEventListener('pointermove',show);svg.addEventListener('pointerdown',show);\n"
   "}\n"
   "\n"
   "/* Advanced: chip details + factory reset */\n"
@@ -1348,7 +1432,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  const a=await jget('/api/diag?mac='+encodeURIComponent(mac));if(!a){el.textContent='Not available.';return}\n"
   "  el.innerHTML=(a.known?advRows(a):'<div class=\"meta\">Chip details arrive within a minute (device firmware: switch 2.6 / tank 1.6 or newer).</div>')+\n"
   "    `<div class=\"row\" style=\"margin-top:14px\"><button class=\"btn d\" onclick=\"devFactory('${a.mac}')\">Factory reset this device…</button></div>\n"
-  "     <p class=\"note\">Erases this device's settings and pairing, removes it from the hub and restarts it. Pair it again with Devices → Allow new devices. Also possible by holding its button (switch: BOOT, tank: its push button) for 10 seconds — the light blinks red after 2 s.</p>`}\n"
+  "     <p class=\"note\">Erases this device's settings and pairing, removes it from the hub and restarts it. Pair it again with Devices → Allow new devices. Also possible by holding the board's <b>BOOT</b> button for 15 seconds — from 2 s the light blinks red, faster and brighter the longer you hold; solid red = accepted; let go before 15 s to cancel.</p>`}\n"
   "async function devFactory(mac){const d=S.devices.find(x=>x.mac===mac);if(!d)return;\n"
   "  if(!confirm('Factory reset \"'+d.name+'\"? All its settings are erased and it must be paired again.'))return;\n"
   "  if(!confirm('Really erase \"'+d.name+'\"?'))return;\n"
@@ -1376,7 +1460,13 @@ void webBegin() {
   });
   server.addHandler(&consoleWs);
 
-  auto sendIndex = [](AsyncWebServerRequest* r) { r->send(200, "text/html", (const uint8_t*)INDEX_HTML, strlen_P(INDEX_HTML)); };
+  auto sendIndex = [](AsyncWebServerRequest* r) {         // cached by the browser until the firmware changes
+    const char* etag = "\"leo-" HUB_FW "\"";
+    if (r->hasHeader("If-None-Match") && r->header("If-None-Match") == etag) { r->send(304); return; }
+    AsyncWebServerResponse* res = r->beginResponse(200, "text/html", (const uint8_t*)INDEX_HTML, strlen_P(INDEX_HTML));
+    res->addHeader("ETag", etag); res->addHeader("Cache-Control", "no-cache");
+    r->send(res);
+  };
   server.on("/", HTTP_GET, sendIndex);
   server.on("/index.html", HTTP_GET, sendIndex);
   server.on("/manifest.json", HTTP_GET, [](AsyncWebServerRequest* r) {
@@ -1465,6 +1555,15 @@ void webBegin() {
     if (!authOk(r)) { r->send(401, "application/json", "{\"err\":\"login\"}"); return; }
     uint8_t mac[6]; if (!r->hasParam("mac") || !parseMac(r->getParam("mac")->value(), mac)) { r->send(400); return; }
     Hist* h = histFor(mac, 0);
+    if (r->hasParam("range") && r->getParam("range")->value() == "fine") {      // 10-second readings, last hour
+      int f = -1; for (int j = 0; j < 4; ++j) if (fine[j].used && !memcmp(fine[j].mac, mac, 6)) f = j;
+      String s; s.reserve(2400); s = "{\"step\":10,\"end\":" + String(f >= 0 ? (uint32_t)(fine[f].lastTick * 10) : 0) + ",\"v\":[";
+      if (f >= 0) for (int k = FINE_SLOTS - 1; k >= 0; --k) {
+        uint16_t v = fine[f].v[(fine[f].lastTick - k) % FINE_SLOTS];
+        if (k != FINE_SLOTS - 1) s += ','; s += v == 0xFFFF ? String("null") : String(v);
+      }
+      s += "]}"; r->send(200, "application/json", s); return;
+    }
     if (r->hasParam("range") && r->getParam("range")->value() == "week") {      // hourly averages, 7 days
       String s; s.reserve(1400); s = "{\"step\":3600,\"end\":" + String(h ? (uint32_t)(h->lastHour * 3600) : 0) + ",\"v\":[";
       if (h) for (int k = HIST_HOURS - 1; k >= 0; --k) {
@@ -1771,7 +1870,7 @@ void setup() {
 void hubLedTick() {
   static uint32_t last = 0, shown = 0xFFFFFFFF; if (millis() - last < 20) return; last = millis();
   if (resetArmed()) {                                       // BOOT held: factory reset is armed
-    uint32_t c = ((millis() / 120) % 2) ? ledA.Color(40, 0, 0) : 0;
+    uint32_t c = ledA.Color(resetLevel(), 0, 0);
     if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
     return;
   }
@@ -1869,7 +1968,7 @@ void loop() {
     if (lk != prevLock) { prevLock = lk; stateDirty = true; if (lockSched && !lockManual) activity(String("Night lock ") + (lk ? "started" : "ended") + " (schedule)", false); }
     if (millis() < pairingUntil + 1500) stateDirty = true;    // countdown in the UI
   }
-  if (ws.count() && ((stateDirty && millis() - lastPush > 250) || millis() - lastPush > 5000)) {
+  if (ws.count() && ((stateDirty && millis() - lastPush > 250) || millis() - lastPush > 2000)) {   // >= every 2 s: the page's "still live" signal
     stateDirty = false; lastPush = millis(); ws.textAll(stateJson());
   }
   if (restartAt && (int32_t)(millis() - restartAt) >= 0) ESP.restart();

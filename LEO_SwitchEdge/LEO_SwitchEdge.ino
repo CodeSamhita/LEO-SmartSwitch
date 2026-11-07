@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.6.0-sw"
+#define EDGE_FW           "2.6.1-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -306,16 +306,25 @@ void factoryReset(const char* why) {
   prefs.clear(); LittleFS.remove(CFG_FILE);
   restartAt = millis() + 300;
 }
-/* BOOT button (GPIO9) held 10 s = factory reset; the LED blinks red after 2 s so you know it is armed */
+/* BOOT button (GPIO9) held 15 s = factory reset. From 2 s the LED blinks red, slow and dim at first,
+   faster and brighter the longer you hold; at 15 s it turns solid bright red (accepted) and the board wipes and restarts.
+   Let go before 15 s to cancel. Needs a solid LOW on a pulled-up pin, so a loose pin can't trigger it. */
 #define RESET_BTN_PIN 9
-#define RESET_HOLD_MS 10000
-uint32_t resetHeldSince = 0;
+#define RESET_HOLD_MS 15000
+uint32_t resetHeldSince = 0; bool resetAccepted = false;
 void resetBtnTick() {
+  if (resetAccepted) return;
   if (digitalRead(RESET_BTN_PIN) != LOW) { resetHeldSince = 0; return; }
   if (!resetHeldSince) resetHeldSince = millis();
-  if (millis() - resetHeldSince >= RESET_HOLD_MS && !restartAt) factoryReset("BOOT button held 10 s");
+  if (millis() - resetHeldSince >= RESET_HOLD_MS && !restartAt) { resetAccepted = true; factoryReset("BOOT button held 15 s"); restartAt = millis() + 1500; }
 }
-bool resetArmed() { return resetHeldSince && millis() - resetHeldSince > 2000; }
+bool resetArmed() { return resetAccepted || (resetHeldSince && millis() - resetHeldSince > 2000); }
+uint8_t resetLevel() {                  // red level for the reset light right now (0 = dark half of a blink)
+  if (resetAccepted) return 160;
+  float p = constrain((float)(millis() - resetHeldSince - 2000) / (RESET_HOLD_MS - 2000), 0.0f, 1.0f);
+  uint32_t period = 1000 - (uint32_t)(p * 880);          // 1 s -> 0.12 s
+  return (millis() % period) < period / 2 ? (uint8_t)(6 + p * 144) : 0;
+}
 
 void handleCmd(const MsgCmd& c) {
   switch (c.cmd) {
@@ -462,7 +471,7 @@ void ledTick() {
   if (millis() - last < 30) return; last = millis();
   uint32_t c;
   if (resetArmed()) {                                   // holding BOOT for a factory reset
-    c = ((millis() / 120) % 2) ? pix.Color(40, 0, 0) : 0;
+    c = pix.Color(resetLevel(), 0, 0);
   } else if (millis() < BOOT_GLOW_MS) {
     c = bootGlowColor(bootGlowLevel());
   } else if (millis() < identifyUntil) {

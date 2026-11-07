@@ -12,17 +12,17 @@ and open no hotspot.
 
 | Folder | Device | Firmware |
 |---|---|---|
-| [`LEO_Hub/`](LEO_Hub/LEO_Hub.ino) | Hub, ESP32-S3 (8 MB) | 1.8.0 |
+| [`LEO_Hub/`](LEO_Hub/LEO_Hub.ino) | Hub, ESP32-S3 (8 MB) | 1.9.0 |
 | [`LEO_SwitchEdge/`](LEO_SwitchEdge/LEO_SwitchEdge.ino) | 4-relay smart switch, ESP32-C3 Super Mini | 2.6.0 |
-| [`LEO_TankEdge/`](LEO_TankEdge/LEO_TankEdge.ino) | Water-tank monitor, ESP32-C3 Super Mini | 1.6.0 |
+| [`LEO_TankEdge/`](LEO_TankEdge/LEO_TankEdge.ino) | Water-tank monitor, ESP32-C3 Super Mini | 1.7.1 |
 
 Each folder is a single Arduino sketch (`.ino`). The web app is built into the hub firmware.
 
 ## What it does
 - **One web app** at `http://leohub.local` (or the hub's IP address). It works on any phone or PC on your WiFi.
   - The **Home** page shows quick controls; tap a device for all of its options.
-  - **Switch:** relays, names and watts, unused relays hidden, touch buttons, 24 h power chart.
-  - **Tank:** level, alarms, calibration, LED colours, daytime display, 24 h level chart.
+  - **Switch:** relays, names and watts, unused relays hidden, touch buttons, power chart (24 h / yesterday / 7 days).
+  - **Tank:** level, up to 6 alarm rules (sound, times, colour), calibration, LED colours per LED, daytime display, level chart.
   - **Activity:** every ON/OFF, setting change, blocked attempt and restart, with time.
   - **Hub:** night lock, password, WiFi, firmware updates, and an *Advanced* section with chip details,
     live log and factory reset.
@@ -53,6 +53,7 @@ Each folder is a single Arduino sketch (`.ino`). The web app is built into the h
 ## Documentation
 | | |
 |---|---|
+| [docs/setup.md](docs/setup.md) | **Start here:** set up the hub, add or remove devices, factory reset |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit together, room light, history, status LEDs |
 | [docs/hardware.md](docs/hardware.md) | Boards, pins and wiring for hub, switch and tank |
 | [docs/web-app.md](docs/web-app.md) | Using the web app, every page and setting |

@@ -22,6 +22,7 @@ little-endian structs.
 | 10–13 | OTA_BEGIN/DATA/END/ACK | both | stop-and-wait firmware transfer, 200-byte chunks |
 | 14 | PING | hub → edge | keep-alive: local time (minutes), room light, beat (ms % 10000) |
 | 15 | DIAG | edge → hub | chip temperature, heap, storage, flash, firmware size, reset reason, CPU MHz, ESP-IDF version |
+| 16 | TANK_RULES | tank → hub | 6 alarm rules × {on, level %, dir (0 rises to, 1 drops to), sound 0–5, repeats, flash colour 0–5} |
 
 ## Commands (`CMD.cmd`)
 | # | Command | Used by |
@@ -37,8 +38,9 @@ little-endian structs.
 | 9 | TOUCH (val) | switch |
 | 10 | TANK_SET (idx, f) | tank |
 | 11 | SILENCE | tank |
-| 12 | BEEP | tank |
+| 12 | BEEP: idx 0 = short beep, idx 1–6 = play sound idx-1 once, val = flash colour | tank |
 | 13 | FACTORY | all |
+| 14 | TANK_RULE: idx = rule 0–5, text[0..5] = rule bytes | tank |
 
 `TANK_SET` indexes:
 
@@ -56,6 +58,7 @@ little-endian structs.
 | 10 | display from (hour) |
 | 11 | display to (hour) |
 | 12 | minimum brightness |
+| 13–20 | custom colour of LED 1–8 (0xRRGGBB) |
 
 ## Compatibility rule
 New fields are only ever **appended** to a struct. Receivers accept the older, shorter length and use

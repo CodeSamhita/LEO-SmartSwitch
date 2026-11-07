@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.7.0-tank"
+#define EDGE_FW           "1.7.2-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -309,15 +309,25 @@ void factoryReset(const char* why) {
   buzzer(false); prefs.clear();
   restartAt = millis() + 300;
 }
-/* the tank's button held 10 s = factory reset (a short press still silences an alarm);
-   all LEDs blink red after 2 s so you know it is armed - let go before 10 s to cancel */
-#define RESET_HOLD_MS 10000
-uint32_t resetHeldSince = 0;
-bool resetArmed() { return resetHeldSince && millis() - resetHeldSince > 2000; }
+/* the board's BOOT button held 15 s = factory reset (same on every LEO device). From 2 s all LEDs blink red,
+   slow and dim at first, faster and brighter the longer you hold; at 15 s they turn solid bright red (accepted)
+   and the tank wipes itself and restarts. Let go before 15 s to cancel. */
+#define RESET_HOLD_MS 15000
+uint32_t resetHeldSince = 0; bool resetAccepted = false;
+bool resetArmed() { return resetAccepted || (resetHeldSince && millis() - resetHeldSince > 2000); }
+uint8_t resetLevel() {                  // red level for the reset light right now (0 = dark half of a blink)
+  if (resetAccepted) return 160;
+  float p = constrain((float)(millis() - resetHeldSince - 2000) / (RESET_HOLD_MS - 2000), 0.0f, 1.0f);
+  uint32_t period = 1000 - (uint32_t)(p * 880);          // 1 s -> 0.12 s
+  return (millis() % period) < period / 2 ? (uint8_t)(6 + p * 144) : 0;
+}
+#define BOOT_BTN_PIN 9                  // the C3 Super Mini's own BOOT button (pull-up, always fitted)
 void resetBtnTick() {
-  if (digitalRead(BTN_PIN) != LOW) { resetHeldSince = 0; return; }
+  // needs a solid LOW for 15 s on a pin with a pull-up: a missing or loose button can never trigger it
+  if (resetAccepted) return;
+  if (digitalRead(BOOT_BTN_PIN) != LOW) { resetHeldSince = 0; return; }       // BOOT button only (the push button just silences alarms)
   if (!resetHeldSince) resetHeldSince = millis();
-  if (millis() - resetHeldSince >= RESET_HOLD_MS && !restartAt) factoryReset("button held 10 s");
+  if (millis() - resetHeldSince >= RESET_HOLD_MS && !restartAt) { resetAccepted = true; factoryReset("BOOT button held 15 s"); restartAt = millis() + 1500; }
 }
 void buttonTick() {
   static bool stable = true, raw = true; static uint32_t changedAt = 0;
@@ -354,7 +364,7 @@ void ledTick() {
   auto scaled = [&](uint8_t r, uint8_t g, uint8_t b, int k) { return strip.Color(r * k / 255, g * k / 255, b * k / 255); };
 
   if (resetArmed()) {                                   // holding the button for a factory reset
-    bool on = (millis() / 120) % 2; for (int i = 0; i < NUM_LEDS; ++i) c[i] = on ? strip.Color(30, 0, 0) : 0;
+    uint8_t lv = resetLevel(); for (int i = 0; i < NUM_LEDS; ++i) c[i] = strip.Color(lv, 0, 0);
   } else if (millis() < identifyUntil) {
     bool on = (millis() / 150) % 2; for (int i = 0; i < NUM_LEDS; ++i) c[i] = on ? strip.Color(60, 60, 60) : 0;
   } else if (millis() < btnFeedbackUntil) {
@@ -363,9 +373,13 @@ void ledTick() {
     const uint8_t* fc = FLASH[alertR.color < 6 ? alertR.color : 2];        // the rule's flash colour (none = dark)
     for (int i = 0; i < ledCount; ++i) c[i] = scaled(fc[0], fc[1], fc[2], max(br, 20));
   } else if (sensorOk) {
-    for (int i = 0; i < levelLeds && i < ledCount; ++i) { uint8_t r, g, b; gradColor(i, r, g, b); c[i] = scaled(r, g, b, br); }
-  } else if (millis() > 8000) {                          // ultrasonic sensor problem: all level LEDs blink yellow
-    bool on = (millis() / 500) % 2;
+    for (int i = 0; i < levelLeds && i < ledCount; ++i) {
+      uint8_t r, g, b; gradColor(i, r, g, b);
+      int k = br; if (i == levelLeds - 1 && br > 0) k = min(255, max(br + 1, br * 11 / 10));   // current level LED ~10 % brighter
+      c[i] = scaled(r, g, b, k);
+    }
+  } else if (millis() > 8000) {                          // ultrasonic sensor problem: all level LEDs blink yellow, rapidly
+    bool on = (millis() / 150) % 2;
     for (int i = 0; i < ledCount; ++i) c[i] = on ? scaled(255, 170, 0, max(br, (int)minBright)) : 0;
   }
   // LED 8: faint quick breath, same scheme as the LEO switch; red = sensor fault
@@ -618,17 +632,19 @@ void statusPrint() {                                // once every 5 s on USB, fo
 }
 
 /* ------------------------------ setup / loop ------------------------ */
-/* Power-on check, before anything else: red -> blue -> green sweep over the whole strip (~1.2 s)
-   = "power is good, LEDs work". The room light is read FIRST from our own LDR, so at night the
-   sweep is barely visible (3/255) and silent; in a lit room it is 25/255 with a short chirp.   */
+/* Power-on glow, before anything else - the same on every LEO device: soft warm white for ~1.5 s
+   (on, hold, fade out over the last 0.3 s) = "power is good, booting". The room light is read FIRST from
+   our own LDR: 14/255 in a lit room (plus a short chirp), 3/255 and silent in a dark one.            */
 void selfTest() {
   long s = 0; for (int i = 0; i < 16; ++i) s += analogRead(LDR_PIN);
   ldrRaw = s / 16; litState = ldrRaw > (LIT_ON_LDR + LIT_OFF_LDR) / 2;
-  uint8_t k = litState ? 25 : 3;
-  const uint32_t cols[3] = { strip.Color(k, 0, 0), strip.Color(0, 0, k), strip.Color(0, k, 0) };
-  for (int c = 0; c < 3; ++c) { for (int i = 0; i < NUM_LEDS; ++i) strip.setPixelColor(i, cols[c]); strip.show(); delay(400); }
-  strip.clear(); strip.show();
+  const uint8_t peak = litState ? 14 : 3;
+  auto glow = [&](uint8_t k) { for (int i = 0; i < NUM_LEDS; ++i) strip.setPixelColor(i, strip.Color(k, k * 3 / 5, k / 4)); strip.show(); };
+  glow(peak);
   if (litState) { buzzer(true); delay(60); buzzer(false); }
+  delay(1140);
+  for (int step = 10; step >= 0; --step) { glow(peak * step / 10); delay(30); }
+  strip.clear(); strip.show();
 }
 
 void setup() {
@@ -638,6 +654,7 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT); digitalWrite(TRIG_PIN, LOW);
   pinMode(ECHO_PIN, INPUT_PULLDOWN);               // no sensor -> reads LOW -> clean "no echo"
   pinMode(BTN_PIN, INPUT_PULLUP);
+  pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
   analogReadResolution(12);
   strip.begin(); strip.setBrightness(255); strip.clear(); strip.show();
   selfTest();

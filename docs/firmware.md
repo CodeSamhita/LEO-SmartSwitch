@@ -40,16 +40,16 @@ A switch update restarts the switch, so every relay goes OFF for about a minute.
 ## Factory reset
 | Device | From the web app | With a button |
 |---|---|---|
-| Hub | *Hub → Advanced → Factory reset the hub* (type RESET) | hold **BOOT** 10 s |
-| Switch | *switch page → Advanced → Factory reset this device* | hold **BOOT** 10 s |
-| Tank | *tank page → Advanced → Factory reset this device* | hold the tank's **push button** 10 s |
+| Hub | *Hub → Advanced → Factory reset the hub* (type RESET) | hold **BOOT** 15 s |
+| Switch | *switch page → Advanced → Factory reset this device* | hold **BOOT** 15 s |
+| Tank | *tank page → Advanced → Factory reset this device* | hold **BOOT** 15 s |
 
-- **Warning:** after 2 s of holding, the light blinks red fast. Let go before 10 s to cancel.
+- **Warning:** After 2 s the light blinks **red**: slow and dim at first, faster and brighter the longer you hold. At **15 s** it turns **solid bright red**: the reset is accepted and the board wipes itself and restarts. Let go before 15 s to cancel.
 - **Hub:**
   - It first tells every paired device to forget it.
   - Then it erases WiFi, password, devices, names, logs and history, and restarts with a **setup hotspot that has no
     password** (*LEO-Hub-xxxxxx*). Open `http://192.168.4.1` and set WiFi again; the hotspot locks again after that.
-- **Edge:** it erases its pairing key and all settings (names, watts, touch, calibration, alarms, LEDs) and
+- **Edge:** it erases its pairing key and all settings (names, watts, touch, calibration, alarm rules, LEDs, colours) and
   restarts unpaired. Pair it again with *Devices → Allow new devices*.
 
 ## USB serial commands (115200 baud)

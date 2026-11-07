@@ -3,65 +3,81 @@
 Open **`http://leohub.local`**.
 - If you open the hub by its IP address instead, the page moves you to `leohub.local` once it has
   checked that your phone or PC can reach that name. Some Android browsers can't, and then you stay on the IP.
-- Add `?ip` to the address to never switch, for example `http://192.168.1.115/?ip`.
-- On Android, Chrome may block local addresses; use another browser or allow Chrome's local-network access.
+- Add `?ip` to the address to never switch.
+- On Android, Chrome may block local addresses; use another browser (for example Brave) or allow local-network access.
 
 Every setting has a **?** next to it. Tap it for a short explanation.
 
-## Home
-Quick controls for every device:
-- **Switch card:** relay toggles, the total power, and **All on / All off**. Relays marked *not in use* are hidden and skipped by All on.
-- **Tank card:** the level, distance, status and room light.
+**The page stays live:** the hub sends an update at least every 2 seconds. If updates stop (phone asleep, WiFi blip,
+hub restarting), the header shows **Reconnecting…** and the page reconnects by itself. It also reconnects the
+moment you come back to the tab. The page is cached and only downloads again after a hub firmware update.
 
-Tap a card (not its buttons) to open the device page.
+## Home
+Quick controls for every device. Tap a card (not its buttons) to open the device's page.
+- **Switch card:** relay toggles, the total power, and **All on / All off**. Relays marked *not in use* are hidden and skipped by All on.
+- **Tank card:** a bar that looks like the real LED strip, with the same number of LEDs and the same colours, plus the level,
+  distance, status and room light. The bar is **yellow** when the sensor has a problem.
 
 ## Switch page
-- **Controls:** every relay, with how long it has been on, plus All on / All off, signal, uptime and firmware.
-- **Power use, last 24 hours:** a chart of the average watts per 5 minutes, the estimated kWh for the day and the peak.
-- **Relays:**
-  - The name and watts of each relay.
-  - **In use:** switch it off for a relay with nothing connected.
-- **Touch buttons:** turn the TTP223 pads on GPIO 4–7 on or off.
-- **Device:** name, Identify (flashes the LED), Restart, and Update / forget.
-- **Advanced:** chip temperature, free memory, storage, firmware size, last restart cause, ESP-IDF version, and **factory reset**.
+- **Controls:** every relay (and how long it has been on), All on / All off, signal, uptime and firmware.
+- **Power use:** a chart with **1 h / 6 h / 24 h / Yesterday / 7 days**.
+  - **Points:** each point is the average power of 5 minutes (24 h) or of an hour (Yesterday, 7 days).
+  - **The last point** is the **live** power right now.
+  - **Footer:** *Now … W*, the estimated energy (kWh) and the peak.
+- **Relays:** name and watts per relay. **In use**: switch it off for a relay with nothing connected.
+- **Touch buttons:** turn the touch pads on GPIO 4–7 on or off.
+- **Device:** name, Identify, Restart, Update firmware…, **Remove device…**
+- **Advanced:** chip temperature, free memory, storage, firmware size, last restart cause, ESP-IDF version, and **Factory reset this device**.
 
 ## Tank page
-- **Live:** level, distance, status, room light, signal and firmware.
-- **Actions:** **Silence alarm**, **Test buzzer** and **Identify**.
-- **Water level, last 24 hours:** a chart, with the current, lowest and highest level.
-- **Tank size (calibration):** the distance when FULL and when EMPTY.
-  - **Use now** copies the current reading. Fill the tank and press *Use now* next to Full; do the same for Empty.
-- **Alarms:**
-  - The full % and low % levels.
-  - **Buzzer** on/off.
-  - **Quiet hours:** no beeping between these times. The buzzer is also quiet whenever the room is dark.
+- **Live view:** level, distance, status, room light, signal and firmware.
+- **Actions:** **Silence alarm**, **Beep** (a short test beep) and **Identify**.
+- **Water level:** a chart with **1 h / 6 h / 24 h / Yesterday / 7 days**, the last point live, plus the lowest and highest level.
+- **Tank size (calibration):** the distance when FULL and when EMPTY. **Use now** copies the current reading.
+- **Alarm rules:** up to 6. Each rule has:
+
+  | Field | Choices |
+  |---|---|
+  | On / off | |
+  | **When level rises to** / **drops to** | a level in % |
+  | **Sound** | Chirp · Short beeps · Long beeps · Triple beep · Siren · LEDs only |
+  | **Times** | 1–30 |
+  | **Flash colour** | none · green · red · blue · white · amber |
+
+  - **Test:** plays the sound once. **Save:** sends the rule to the tank.
+  - **Firing:** a rule fires once, then re-arms when the level has moved 5 % back.
+  - **Stopping it:** the tank's push button or **Silence alarm** stops it.
+  - **Defaults:** rule 1 = rises to 95 %, long beeps ×10, green. Rule 2 = drops to 10 %, short beeps ×10, red.
+  - **Status labels:** at what % the status text says *Full* or *Low*. This does not affect alarms.
+  - **Buzzer** on/off, and **quiet hours**. The buzzer is also quiet whenever the room is dark; the LEDs still flash.
 - **LED display:**
-  - Level colours: **Red → Blue** or **Red → Green**.
+  - **Level colours:** Red → Blue, Red → Green, or **Custom**. Custom gives one colour picker per LED, listed **top LED first**,
+    like the real strip.
   - **LEDs used to show the level:** 1–8, counted from the bottom.
-  - **Daytime display:** between these hours the level LEDs never go fully dark. They stay at least
-    at **Minimum brightness** (1–60). At night they follow the room light.
+  - **Daytime display:** between these hours the level LEDs never go fully dark (they stay at least at *Minimum brightness*).
+- **Sensor problem:** when the ultrasonic sensor fails, all level LEDs on the tank **blink yellow rapidly**.
 - **Device and Advanced:** the same as for the switch.
 
-Every setting is stored **on the tank itself**, so it keeps working without the hub. The page shows the
-new value once the tank confirms it.
+Every tank setting and rule is stored **on the tank itself**, so it keeps working without the hub.
 
 ## Devices
-- **Allow new devices for 2 minutes:** pairing is only accepted while this is open.
-- **Per device:** rename, the relays' names, watts and GPIO, touch buttons, Identify, Restart, **Forget**,
-  and **Update firmware** (choose the `.bin`).
+- **Add a device:** a step-by-step guide plus **Start adding (2 minutes)**. The page shows *✅ Added: …* when the new device joins.
+  If a new device tries to join while adding is closed, a banner offers **Allow**. See [setup.md](setup.md).
+- **Per device:** rename, relays, touch, Identify, Restart, **Remove device**, and **Update firmware** (choose the `.bin`).
 
 ## Activity
-Every ON/OFF, blocked attempt, setting change, pairing, update, password change and device restart,
+Every ON/OFF, blocked attempt, setting or rule change, pairing, update, password change and device restart,
 with the date and time. **Clear log** deletes it.
 
 ## Hub
-- **Night lock:**
-  - Lock now, or lock automatically every night.
-  - While it is active, every **ON** command is refused and recorded; OFF always works.
-- **Security:** the web password (each browser signs in once and is remembered) and the emergency hotspot password.
+- **Night lock:** lock now, or every night. While it is active, ON commands are refused and recorded; OFF always works.
+- **Security:**
+  - Set or change the web password.
+  - **Remove password…** needs the current one.
+  - The emergency hotspot password.
 - **WiFi:** the network the hub joins.
 - **Hub:** name, restart, and hub firmware update.
 - **Advanced:**
   - Chip details.
-  - The **live log**, with a Clear button. Its time stamps read `yy-mm-dd hh:mm:ss`, or `boot+Ns` before the clock is set.
+  - The **live log**, with a Clear button. Its time stamps read `yy-mm-dd hh:mm:ss`.
   - **Factory reset the hub.**

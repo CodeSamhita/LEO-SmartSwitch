@@ -59,13 +59,13 @@ With no tank online, the clock decides instead (07:00–18:00 = day).
 | blue, every 2 s | hub: emergency hotspot on · edge: never paired |
 | cyan, every 2 s / fast | hub: pairing open · edge: firmware update running |
 | red, every 2 s | tank: no sensor reading |
-| red, fast blinks | a button is being held for a factory reset |
+| red blink, getting faster and brighter → solid red | BOOT held for a factory reset (accepted at 15 s) |
 | white, quick blinks | "Identify" from the web app |
 
 The peak brightness is 5/255 in a lit room and 2/255 in a dark one.
 
 ## History
-- **What is recorded:** for every device, the hub keeps one value per 5 minutes for 24 hours. That is
+- **What is recorded:** for every device, the hub keeps one value per 5 minutes for 24 hours, and one per hour for 7 days. That is
   average watts for a switch (from the watts set per relay) and average level for the tank.
 - **Saving:** it is written to flash every 30 minutes, so a restart loses at most 30 minutes.
 - **Gaps:** when a device was offline, or the tank had no reading, the chart shows a gap.
