@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.9.2"
+#define HUB_FW            "1.9.3"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -199,6 +199,7 @@ struct {                                       // edge OTA (hub -> edge over ESP
   bool active; uint8_t mac[6]; File f; uint32_t size, off; uint16_t lastLen;
   uint8_t phase;                               // 1 begin, 2 data, 3 end
   uint32_t lastSend; uint8_t retries; int pct; String msg; bool uploadOk; String upErr;
+  uint32_t doneAt;                             // when the last update finished (the page clears its message after a while)
 } eota;
 
 char consoleBuf[CONSOLE_LINES][CONSOLE_LINE_LEN];
@@ -509,6 +510,7 @@ String relayName(const Dev& d, int r) { return (r >= 0 && r < 4 && d.rname[r][0]
 
 /* ------------------------- edge OTA streaming ----------------------- */
 void edgeOtaFinish(bool ok, const String& msg) {
+  eota.doneAt = millis();
   if (eota.f) eota.f.close();
   LittleFS.remove(EDGE_BIN);
   eota.active = false; eota.pct = ok ? 100 : eota.pct; eota.msg = msg;
@@ -820,6 +822,7 @@ String stateJson() {
   if (eota.active || eota.msg.length()) {
     JsonObject o = d["ota"].to<JsonObject>();
     o["mac"] = macStr(eota.mac); o["pct"] = eota.pct; o["msg"] = eota.msg; o["active"] = eota.active;
+    o["ago"] = eota.active || !eota.doneAt ? 0 : (millis() - eota.doneAt) / 1000;          // seconds since it finished
   }
   String s; serializeJson(d, s); return s;
 }
@@ -1114,25 +1117,26 @@ static const char INDEX_HTML[] PROGMEM =
   "\n"
   "/* devices page: rebuilt only when the device set changes, so typing isn't clobbered */\n"
   "function renderDevices(){\n"
-  "  const keys=S.devices.map(d=>d.mac+(d.relays?d.relays.length:0)+d.type+d.touch).join(',');\n"
+  "/* Devices = a simple list: status, open its settings page, update firmware, remove. All settings live on the device pages. */\n"
+  "  const keys=S.devices.map(d=>d.mac+d.type+d.name).join(',');\n"
   "  if(keys!==devKeys){devKeys=keys;\n"
   "    $('#devlist').innerHTML=S.devices.length?S.devices.map(d=>`<div class=\"card\" style=\"margin-bottom:12px\" id=\"dv-${d.mac.replace(/:/g,'')}\">\n"
   "      <div class=\"chead\"><span class=\"dot\" data-k=\"dot\"></span><span class=\"nm\">${esc(d.name)}</span><span class=\"pill\">${esc(d.type)}</span></div>\n"
   "      <div class=\"meta\" data-k=\"meta\"></div>\n"
-  "      <label>Device name</label><div class=\"row\" style=\"margin:0\"><input value=\"${esc(d.name)}\" data-k=\"name\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"rename('${d.mac}',this)\">Save</button></div>\n"
-  "      ${d.type==='switch'?(d.relays||[]).map((r,i)=>`<label>Relay ${i+1} (GPIO ${r.gpio}) — name / watts</label>\n"
-  "        <div class=\"row\" style=\"margin:0\"><input value=\"${esc(r.name)}\" data-r=\"${i}n\"><input type=\"number\" value=\"${r.watts}\" style=\"flex:0 0 90px\" data-r=\"${i}w\">\n"
-  "        <button class=\"btn\" style=\"flex:0 0 70px\" onclick=\"relMeta('${d.mac}',${i},this)\">Save</button></div>`).join(''):''}\n"
-  "      ${d.type==='switch'&&d.touch!==undefined?`<label>Touch buttons on the switch (GPIO 4–7)</label><div class=\"row\" style=\"margin:0\"><button class=\"btn ${d.touch?'p':''}\" onclick=\"cmd('${d.mac}',9,{val:${d.touch?0:1}})\">${d.touch?'Enabled — tap to disable':'Disabled — tap to enable'}</button></div>`:''}\n"
-  "      <div class=\"row\"><button class=\"btn\" onclick=\"cmd('${d.mac}',3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart this device?'))cmd('${d.mac}',6)\">Restart</button><button class=\"btn d\" onclick=\"forget('${d.mac}')\">Remove device</button></div>\n"
-  "      <label>Update this device's firmware — choose its .bin</label><input type=\"file\" accept=\".bin\" data-k=\"bin\">\n"
-  "      <div class=\"row\"><button class=\"btn p\" onclick=\"edgeOta('${d.mac}',this)\">Upload &amp; install</button></div>\n"
-  "      <div class=\"bar\"><i data-k=\"bar\"></i></div><div class=\"note\" data-k=\"otamsg\"></div>\n"
-  "    </div>`).join(''):'<div class=\"card empty\">No devices paired yet.</div>'}\n"
+  "      <div class=\"row\"><button class=\"btn p\" onclick=\"${d.type==='tank'?'openTank':'openSw'}('${d.mac}')\">Open settings ›</button><button class=\"btn d\" onclick=\"forget('${d.mac}')\">Remove device</button></div>\n"
+  "      <details style=\"margin-top:10px\"><summary class=\"meta\" style=\"cursor:pointer\">Update firmware…</summary>\n"
+  "        <label>Choose the device's .bin (${d.type==='tank'?'LEO_TankEdge':'LEO_SwitchEdge'}.ino.bin)</label><input type=\"file\" accept=\".bin\" data-k=\"bin\">\n"
+  "        <div class=\"row\"><button class=\"btn p\" onclick=\"edgeOta('${d.mac}',this)\">Upload &amp; install</button></div></details>\n"
+  "      <div class=\"bar\" data-k=\"barw\" style=\"display:none\"><i data-k=\"bar\"></i></div><div class=\"note\" data-k=\"otamsg\"></div>\n"
+  "    </div>`).join(''):'<div class=\"card empty\">No devices yet — use <b>Add a device</b> above.</div>'}\n"
   "  for(const d of S.devices){const c=$('#dv-'+d.mac.replace(/:/g,''));if(!c)continue;\n"
   "    c.querySelector('[data-k=dot]').className='dot '+(d.online?'on':'off');\n"
-  "    c.querySelector('[data-k=meta]').textContent=d.mac+' · fw '+(d.fw||'?')+' · '+(d.secure?'🔒 secured link':'⚠ link not secured')+' · '+(d.online?('signal '+d.rssi+' dBm · up '+up(d.uptime||0)):('offline, last seen '+ago(d.seenAgo)+' ago'));\n"
-  "    const o=S.ota||{};if(o.mac===d.mac){c.querySelector('[data-k=bar]').style.width=(o.pct||0)+'%';c.querySelector('[data-k=otamsg]').textContent=o.msg||''}}\n"
+  "    c.querySelector('[data-k=meta]').textContent='fw '+(d.fw||'?')+' · '+(d.secure?'🔒 secured':'⚠ not secured')+' · '+(d.online?('signal '+d.rssi+' dBm · up '+up(d.uptime||0)):('offline, last seen '+ago(d.seenAgo)+' ago'));\n"
+  "    // update progress: shown while running, then '✅ Updated' once the device is back, cleared after 2 minutes\n"
+  "    const o=S.ota||{},bw=c.querySelector('[data-k=barw]'),m=c.querySelector('[data-k=otamsg]');\n"
+  "    if(o.mac===d.mac&&(o.active||(o.ago||0)<120)&&o.msg){bw.style.display='';c.querySelector('[data-k=bar]').style.width=(o.pct||0)+'%';\n"
+  "      m.textContent=o.active?o.msg:(/^Installed/.test(o.msg)?(d.online&&(d.uptime||0)<180?'✅ Updated — now running '+(d.fw||''):'Installed — waiting for the device to restart…'):o.msg)}\n"
+  "    else if(!c.dataset.uploading){bw.style.display='none';m.textContent=''}}\n"
   "}\n"
   "async function rename(mac,btn){const v=btn.parentElement.querySelector('input').value.trim();if(v)await cmd(mac,4,{text:v})}\n"
   "async function relMeta(mac,i,btn){const p=btn.parentElement;await cmd(mac,5,{idx:i,text:p.querySelector('[data-r=\"'+i+'n\"]').value.trim(),f:parseFloat(p.querySelector('[data-r=\"'+i+'w\"]').value)||0})}\n"
@@ -1147,7 +1151,8 @@ static const char INDEX_HTML[] PROGMEM =
   "function edgeOta(mac,btn){const c=btn.closest('.card'),f=c.querySelector('[data-k=bin]').files[0],bar=c.querySelector('[data-k=bar]'),msg=c.querySelector('[data-k=otamsg]');\n"
   "  if(!f||!/\\.bin$/i.test(f.name)){msg.textContent='Choose the device\\'s .bin file first.';return}\n"
   "  if(!confirm('Send '+f.name+' to this device? It restarts when done.'))return;\n"
-  "  upload('/api/edge-ota?mac='+encodeURIComponent(mac),f,bar,msg,(ok,e)=>{msg.textContent=ok?'Sending to device over ESP-NOW…':('Failed: '+(e||'error'))})}\n"
+  "  c.dataset.uploading='1';c.querySelector('[data-k=barw]').style.display='';\n"
+  "  upload('/api/edge-ota?mac='+encodeURIComponent(mac),f,bar,msg,(ok,e)=>{delete c.dataset.uploading;msg.textContent=ok?'Sending to device over ESP-NOW…':('Failed: '+(e||'error'))})}\n"
   "\n"
   "/* activity */\n"
   "async function loadActivity(){const a=await jget('/api/activity');if(!a)return;\n"

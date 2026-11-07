@@ -68,7 +68,8 @@ Every tank setting and rule is stored **on the tank itself**, so it keeps workin
 ## Devices
 - **Add a device:** a step-by-step guide plus **Start adding (2 minutes)**. The page shows *✅ Added: …* when the new device joins.
   If a new device tries to join while adding is closed, a banner offers **Allow**. See [setup.md](setup.md).
-- **Per device:** rename, relays, touch, Identify, Restart, **Remove device**, and **Update firmware** (choose the `.bin`).
+- **Device list:** one row per device with status, firmware and signal, plus **Open settings ›** (its page, where all of its settings are), **Remove device**, and **Update firmware…** (choose the `.bin`).
+- **Update progress:** shown while the update runs, then *✅ Updated — now running x.y.z* once the device is back. The message clears after 2 minutes.
 
 ## Activity
 Every ON/OFF, blocked attempt, setting or rule change, pairing, update, password change and device restart,
