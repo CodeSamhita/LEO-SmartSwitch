@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.6.0"
+#define HUB_FW            "1.7.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -72,7 +72,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12 };   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo, value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12 };   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright, value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -81,7 +81,7 @@ struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t roo
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
-struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; };   // tank settings
+struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; };   // tank settings (palette 0 red-blue, 1 red-green; tank 1.5+)
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -130,7 +130,8 @@ struct Dev {
   uint8_t  tflags;                        // tank flags: 1 alarm active, 2 silenced, 4 room dark
   bool     tcfgKnown;                     // tank settings (from M_TANK_INFO)
   float    tFullCm, tEmptyCm;
-  uint8_t  tFullPct, tLowPct, tBuzzer, tQuietFrom, tQuietTo;
+  uint8_t  tFullPct, tLowPct, tBuzzer, tQuietFrom, tQuietTo, tPalette, tLedCount, tShowFrom, tShowTo, tMinBright;
+  uint8_t  hideMask;                      // switch relays marked "not in use" (hidden, skipped by All on) - saved in devices.json
 };
 Dev devs[MAX_DEV];
 SemaphoreHandle_t devLock;
@@ -355,6 +356,7 @@ void devsSave() {
     for (int i = 0; i < MAX_DEV; ++i) if (devs[i].used) {
       JsonObject o = a.add<JsonObject>(); o["mac"] = macStr(devs[i].mac); o["type"] = devs[i].type; o["name"] = devs[i].name;
       if (devs[i].hasKey) o["key"] = hexStr(devs[i].key, 16);
+      if (devs[i].hideMask) o["hide"] = devs[i].hideMask;
     } }
   File f = LittleFS.open(DEV_FILE, "w"); if (f) { serializeJson(d, f); f.close(); }
 }
@@ -368,6 +370,7 @@ void devsLoad() {
     devs[i].used = true; devs[i].type = o["type"] | 0;
     copyStr(devs[i].name, sizeof(devs[i].name), o["name"] | "Device");
     devs[i].hasKey = parseHex(o["key"] | "", devs[i].key, 16);
+    devs[i].hideMask = o["hide"] | 0;
     i++;
   }
 }
@@ -566,11 +569,14 @@ void handlePacket(const RxItem& it) {
     if ((int)d.levelPct != (int)m.levelPct || d.leds != m.leds || d.sensorOk != m.sensorOk || strncmp(d.stateTxt, m.stateTxt, sizeof(d.stateTxt))) stateDirty = true;
     d.levelPct = m.levelPct; d.distCm = m.distCm; d.leds = m.leds; d.tstate = m.state;
     d.sensorOk = m.sensorOk; d.uptime = m.uptime; copyStr(d.stateTxt, sizeof(d.stateTxt), m.stateTxt);
-  } else if (h->type == M_TANK_INFO && blen >= sizeof(MsgTankInfo)) {
-    MsgTankInfo m; memcpy(&m, it.data, sizeof(m));
+  } else if (h->type == M_TANK_INFO && blen >= offsetof(MsgTankInfo, palette)) {   // older tanks send fewer fields
+    MsgTankInfo m = {}; m.ledCount = 7; m.showFrom = 7; m.showTo = 22; m.minBright = 6;
+    memcpy(&m, it.data, min(blen, sizeof(m)));
     DevGuard g; Dev& d = devs[i];
     d.tFullCm = m.fullCm; d.tEmptyCm = m.emptyCm; d.tFullPct = m.fullPct; d.tLowPct = m.lowPct;
-    d.tBuzzer = m.buzzer; d.tQuietFrom = m.quietFrom; d.tQuietTo = m.quietTo; d.tcfgKnown = true; stateDirty = true;
+    d.tBuzzer = m.buzzer; d.tQuietFrom = m.quietFrom; d.tQuietTo = m.quietTo; d.tPalette = m.palette; d.tLedCount = m.ledCount;
+    d.tShowFrom = m.showFrom; d.tShowTo = m.showTo; d.tMinBright = m.minBright;
+    d.tcfgKnown = true; stateDirty = true;
   } else if (h->type == M_OTA_ACK && blen >= sizeof(MsgOtaAck)) {
     MsgOtaAck a; memcpy(&a, it.data, sizeof(a));
     edgeOtaOnAck(it.mac, a);
@@ -645,7 +651,7 @@ String stateJson() {
         for (int r = 0; r < v.n; ++r) {
           JsonObject x = rl.add<JsonObject>();
           x["name"] = v.rname[r]; x["watts"] = v.watts[r]; x["gpio"] = v.gpio[r];
-          x["on"] = (bool)(v.onMask & (1 << r)); x["onSecs"] = v.onSecs[r];
+          x["on"] = (bool)(v.onMask & (1 << r)); x["onSecs"] = v.onSecs[r]; x["used"] = !(v.hideMask & (1 << r));
         }
       } else if (v.type == DEV_TANK) {
         JsonObject t = o["tank"].to<JsonObject>();
@@ -657,6 +663,8 @@ String stateJson() {
           JsonObject c = t["cfg"].to<JsonObject>();
           c["fullCm"] = v.tFullCm; c["emptyCm"] = v.tEmptyCm; c["fullPct"] = v.tFullPct; c["lowPct"] = v.tLowPct;
           c["buzzer"] = (bool)v.tBuzzer; c["quietFrom"] = v.tQuietFrom; c["quietTo"] = v.tQuietTo;
+          c["palette"] = v.tPalette; c["ledCount"] = v.tLedCount;
+          c["showFrom"] = v.tShowFrom; c["showTo"] = v.tShowTo; c["minBright"] = v.tMinBright;
         }
       }
     } }
@@ -746,6 +754,8 @@ static const char INDEX_HTML[] PROGMEM =
   ".chev{color:var(--mut);font-size:20px;line-height:1}\n"
   ".kv{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed #1e2731;font-size:13px}.kv:last-child{border:0}.kv span{color:var(--mut)}\n"
   ".btn:disabled{opacity:.45}\n"
+  ".hlp{display:inline-grid;place-items:center;width:17px;height:17px;border:1px solid var(--mut);border-radius:50%;font-size:10.5px;font-weight:700;color:var(--mut);margin-left:6px;cursor:pointer;vertical-align:1px;text-transform:none}\n"
+  ".hlpt{display:none;background:var(--s2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:6px 0;font-size:12px;color:var(--txt);text-transform:none;letter-spacing:0;font-weight:400}.hlpt.show{display:block}\n"
   "</style>\n"
   "</head>\n"
   "<body>\n"
@@ -767,7 +777,6 @@ static const char INDEX_HTML[] PROGMEM =
   "  <div id=\"banners\"></div>\n"
   "\n"
   "  <section class=\"page active\" id=\"p-home\">\n"
-  "    <div class=\"row\" style=\"margin:0 0 12px\"><button class=\"btn p\" onclick=\"everything(true)\">Everything On</button><button class=\"btn\" onclick=\"everything(false)\">Everything Off</button></div>\n"
   "    <div class=\"grid\" id=\"cards\"></div>\n"
   "  </section>\n"
   "\n"
@@ -826,6 +835,12 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"logbox\" id=\"log\">Connecting…</div>\n"
   "  </section>\n"
   "\n"
+  "  <section class=\"page\" id=\"p-sw\">\n"
+  "    <div class=\"row\" style=\"margin:0 0 12px\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"nav('home')\">‹ Back</button></div>\n"
+  "    <div id=\"swlive\"></div>\n"
+  "    <div id=\"swset\"></div>\n"
+  "  </section>\n"
+  "\n"
   "  <section class=\"page\" id=\"p-tank\">\n"
   "    <div class=\"row\" style=\"margin:0 0 12px\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"nav('home')\">‹ Back</button></div>\n"
   "    <div id=\"tlive\"></div>\n"
@@ -873,7 +888,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function nav(p){page=p;$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
   "  $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));\n"
   "  if(p==='devices'){devKeys='';render()} if(p==='hub'){loadHub();logOn()}else logOff(); if(p==='activity')loadActivity();\n"
-  "  if(p==='tank'){tsetKey='';renderTank()} window.scrollTo(0,0)}\n"
+  "  if(p==='tank'){tsetKey='';renderTank()} if(p==='sw'){swKey='';renderSw()} window.scrollTo(0,0)}\n"
   "\n"
   "function render(){\n"
   "  const h=S.hub||{};$('#hubName').textContent=h.name||'LEO Home Hub';\n"
@@ -889,6 +904,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  if(page==='devices')renderDevices();\n"
   "  if(page==='hub')renderLock();\n"
   "  if(page==='tank')renderTank();\n"
+  "  if(page==='sw')renderSw();\n"
   "}\n"
   "function totalW(d){return (d.relays||[]).reduce((a,r)=>a+(r.on?r.watts:0),0)}\n"
   "function renderHome(){\n"
@@ -898,9 +914,9 @@ static const char INDEX_HTML[] PROGMEM =
   "    const st=d.online?'<span class=\"dot on\"></span>':'<span class=\"dot off\"></span>';\n"
   "    const meta=d.online?('signal '+d.rssi+' dBm · up '+up(d.uptime||0)+(d.secure?' · 🔒 secured':' · ⚠ not secured')):('offline · last seen '+ago(d.seenAgo)+' ago');\n"
   "    if(d.type==='switch'){\n"
-  "      const rel=(d.relays||[]).map((r,i)=>`<div class=\"rel\"><div class=\"n\"><b>${esc(r.name)}</b><span class=\"meta\">${r.on?('On · '+r.watts+' W'):'Off'}</span></div>\n"
+  "      const rel=(d.relays||[]).map((r,i)=>r.used===false?'':`<div class=\"rel\"><div class=\"n\"><b>${esc(r.name)}</b><span class=\"meta\">${r.on?('On · '+r.watts+' W'):'Off'}</span></div>\n"
   "        <button class=\"tgl ${r.on?'on':''}\" ${d.online?'':'disabled'} onclick=\"tog(this,'${d.mac}',${i},${!r.on})\"></button></div>`).join('');\n"
-  "      return `<div class=\"card ${d.online?'':'offline'}\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span><span class=\"w\">${totalW(d).toFixed(0)} W</span></div>\n"
+  "      return `<div class=\"card click ${d.online?'':'offline'}\" onclick=\"cardOpen(event,'sw','${d.mac}')\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span><span class=\"w\">${totalW(d).toFixed(0)} W</span><span class=\"chev\">›</span></div>\n"
   "        ${rel||'<div class=\"meta\">Waiting for relay info…</div>'}\n"
   "        <div class=\"row\"><button class=\"btn\" ${d.online?'':'disabled'} onclick=\"cmd('${d.mac}',2,{val:1})\">All on</button><button class=\"btn\" ${d.online?'':'disabled'} onclick=\"cmd('${d.mac}',2,{val:0})\">All off</button></div>\n"
   "        <div class=\"meta\" style=\"margin-top:8px\">${meta}</div></div>`}\n"
@@ -981,13 +997,22 @@ static const char INDEX_HTML[] PROGMEM =
   "  lws.onmessage=e=>{lines.push(...String(e.data).split('\\n'));if(lines.length>400)lines.splice(0,lines.length-400);const b=$('#log');b.textContent=lines.join('\\n');b.scrollTop=b.scrollHeight};\n"
   "  lws.onclose=()=>{lws=null;if(page==='hub')setTimeout(logOn,2000)}}\n"
   "function logOff(){if(lws){lws.onclose=null;lws.close();lws=null}}\n"
+  "/* opened by IP address? switch to http://leohub.local - but only if this phone/PC can actually reach that\n"
+  "   name (some Android browsers can't resolve .local), otherwise stay on the IP. ?ip in the URL = never switch. */\n"
+  "(function(){const h=location.hostname;if(!/^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(h)||h==='192.168.4.1'||location.search.includes('ip'))return;\n"
+  "  const ac=new AbortController();setTimeout(()=>ac.abort(),2500);\n"
+  "  fetch('http://leohub.local/api/ping?'+Date.now(),{mode:'no-cors',cache:'no-store',signal:ac.signal})\n"
+  "    .then(()=>location.replace('http://leohub.local'+location.pathname+location.hash)).catch(()=>{})})();\n"
   "connect();\n"
   "setInterval(()=>{if(page==='home')renderHome()},5000);\n"
   "/* tank detail page: live view + actions + settings (settings are stored on the tank itself) */\n"
+  "/* q(text): a circled ? that shows/hides an explanation right below it */\n"
+  "function q(t){return `<span class=\"hlp\" onclick=\"event.stopPropagation();this.nextElementSibling.classList.toggle('show')\">?</span><span class=\"hlpt\">${t}</span>`}\n"
   "let tankMac='',tsetKey='';\n"
   "function openTank(m){tankMac=m;nav('tank')}\n"
   "function tankDev(){return S.devices.find(x=>x.mac===tankMac)}\n"
   "function tset(idx,v){return cmd(tankMac,10,{idx:idx,f:+v})}\n"
+  "function hrs(v){return [...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}\n"
   "function renderTank(){\n"
   "  const d=tankDev();if(!d){nav('home');return}\n"
   "  const t=d.tank||{},c=t.cfg,ok=t.sensorOk!==false,on=d.online;\n"
@@ -1009,33 +1034,43 @@ static const char INDEX_HTML[] PROGMEM =
   "  if(key===tsetKey||$('#tset').contains(document.activeElement))return;\n"
   "  tsetKey=key;\n"
   "  if(!c){$('#tset').innerHTML=`<div class=\"card\" style=\"margin-top:12px\"><div class=\"meta\">Waiting for the tank's settings… (tank firmware 1.4 or newer)</div></div>`;return}\n"
-  "  const hrs=v=>[...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('');\n"
+  "  const showOn=c.showFrom!==c.showTo;\n"
   "  $('#tset').innerHTML=`\n"
-  "  <h3>Tank size (calibration)</h3>\n"
+  "  <h3>Tank size (calibration)${q('How the tank turns the sensor distance into a percentage. The sensor sits at the top and measures down to the water: a SHORT distance means a FULL tank, a LONG distance means EMPTY. Fill the tank, wait a minute and press <b>Use now</b> next to Full; do the same for Empty when it is nearly empty. Then press Save.')}</h3>\n"
   "  <div class=\"card\">\n"
-  "    <p class=\"note\" style=\"margin-top:0\">Distance from the sensor to the water. Fill the tank and press <b>Use now</b> for full; same when it is empty.</p>\n"
-  "    <label>Distance when FULL (cm)</label>\n"
+  "    <label>Distance when FULL (cm)${q('Distance from the sensor to the water surface when the tank is full. Readings this close or closer show 100 %.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tFull\" type=\"number\" step=\"0.5\" value=\"${c.fullCm.toFixed(1)}\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"useNow('#tFull')\">Use now</button></div>\n"
-  "    <label>Distance when EMPTY (cm)</label>\n"
+  "    <label>Distance when EMPTY (cm)${q('Distance from the sensor to the water (or the tank floor) when the tank is empty. Readings this far or farther show 0 %. Must be at least 10 cm more than Full.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tEmpty\" type=\"number\" step=\"0.5\" value=\"${c.emptyCm.toFixed(1)}\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"useNow('#tEmpty')\">Use now</button></div>\n"
   "    <div class=\"row\"><button class=\"btn p\" onclick=\"saveCal()\">Save tank size</button></div>\n"
   "    <div class=\"note\" id=\"calmsg\"></div>\n"
   "  </div>\n"
   "  <h3>Alarms</h3>\n"
   "  <div class=\"card\">\n"
-  "    <div class=\"row\" style=\"margin:0\"><div><label>Full alarm at (%)</label><input id=\"tFp\" type=\"number\" min=\"20\" max=\"100\" value=\"${c.fullPct}\"></div>\n"
-  "      <div><label>Low alarm at (%)</label><input id=\"tLp\" type=\"number\" min=\"0\" max=\"80\" value=\"${c.lowPct}\"></div></div>\n"
+  "    <div class=\"row\" style=\"margin:0\"><div><label>Full alarm at (%)${q('When the level reaches this, the tank beeps (long beeps) and flashes green, 10 times. Useful to switch the pump off in time.')}</label><input id=\"tFp\" type=\"number\" min=\"20\" max=\"100\" value=\"${c.fullPct}\"></div>\n"
+  "      <div><label>Low alarm at (%)${q('When the level drops to this, the tank beeps (short beeps) and flashes red, 10 times. Each alarm sounds once, then waits until the level is back in the normal range before it can sound again.')}</label><input id=\"tLp\" type=\"number\" min=\"0\" max=\"80\" value=\"${c.lowPct}\"></div></div>\n"
   "    <div class=\"row\"><button class=\"btn p\" onclick=\"saveAlarms()\">Save alarm levels</button></div>\n"
   "    <div class=\"note\" id=\"almsg\"></div>\n"
-  "    <div class=\"switchrow\" style=\"margin-top:14px\"><span>Buzzer</span><button class=\"tgl ${c.buzzer?'on':''}\" onclick=\"tankBuzzer(this)\"></button></div>\n"
-  "    <div class=\"row\" style=\"margin-top:4px\"><div><label>Quiet from</label><select id=\"tQf\">${hrs(c.quietFrom)}</select></div>\n"
-  "      <div><label>Quiet until</label><select id=\"tQt\">${hrs(c.quietTo)}</select></div></div>\n"
+  "    <div class=\"switchrow\" style=\"margin-top:14px\"><span>Buzzer${q('Turn the beeping off completely. The LEDs still flash for alarms and the app still shows them.')}</span><button class=\"tgl ${c.buzzer?'on':''}\" onclick=\"tankBuzzer(this)\"></button></div>\n"
+  "    <label style=\"margin-top:10px\">Buzzer quiet hours${q('No beeping between these times (for sleeping). The buzzer is also silent whenever the room is dark. Set both times the same to have no quiet hours.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><div><select id=\"tQf\">${hrs(c.quietFrom)}</select></div><div><select id=\"tQt\">${hrs(c.quietTo)}</select></div></div>\n"
   "    <div class=\"row\"><button class=\"btn\" onclick=\"saveQuiet()\">Save quiet hours</button></div>\n"
-  "    <p class=\"note\">The buzzer is also silent whenever the room is dark. Set both times the same for no quiet hours. The LEDs always show alarms.</p>\n"
+  "  </div>\n"
+  "  <h3>LED display</h3>\n"
+  "  <div class=\"card\">\n"
+  "    <label>Level colours${q('Colour of the level LEDs from the bottom (red) to the top: fading to blue, or fading to green.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn ${c.palette?'':'p'}\" onclick=\"tset(8,0)\">Red → Blue</button><button class=\"btn ${c.palette?'p':''}\" onclick=\"tset(8,1)\">Red → Green</button></div>\n"
+  "    <label>LEDs used to show the level${q('How many LEDs, counted from the bottom of the strip, show the water level (1 to 8). A full tank lights all of them. The top LED is always the small status light.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><input id=\"tLeds\" type=\"number\" min=\"1\" max=\"8\" value=\"${c.ledCount||7}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveLeds()\">Save</button></div>\n"
+  "    <label style=\"margin-top:12px\">Daytime display${q('Normally the level LEDs follow the room light and go dark in a dark room. Between these times they always stay on, at least at the minimum brightness below, so you can see the level at a glance. Outside these times (night) they go dark in a dark room. Set both times the same to turn this off.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><div><select id=\"tSf\">${hrs(c.showFrom)}</select></div><div><select id=\"tSt\">${hrs(c.showTo)}</select></div></div>\n"
+  "    <label>Minimum brightness (1–60)${q('How bright the level LEDs are at least during the daytime display. 1 is barely visible, 60 is clearly visible. In a bright room they can be brighter than this.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><input id=\"tMb\" type=\"number\" min=\"1\" max=\"60\" value=\"${c.minBright||6}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveShow()\">Save</button></div>\n"
+  "    <p class=\"note\">${showOn?`Daytime display is on: ${String(c.showFrom).padStart(2,'0')}:00–${String(c.showTo).padStart(2,'0')}:00.`:'Daytime display is off.'}</p>\n"
   "  </div>\n"
   "  <h3>Device</h3>\n"
   "  <div class=\"card\">\n"
-  "    <label>Name</label>\n"
+  "    <label>Name${q('The name shown in the app and in the Activity log.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tName\" value=\"${esc(d.name)}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"tankRename()\">Save</button></div>\n"
   "    <div class=\"row\"><button class=\"btn\" onclick=\"if(confirm('Restart the tank monitor?'))cmd(tankMac,6)\">Restart</button><button class=\"btn\" onclick=\"nav('devices')\">Update / forget…</button></div>\n"
   "  </div>`;\n"
@@ -1053,10 +1088,57 @@ static const char INDEX_HTML[] PROGMEM =
   "  const ok=fp>c.fullPct?(await tset(3,fp)&&await tset(4,lp)):(await tset(4,lp)&&await tset(3,fp));\n"
   "  m.textContent=ok?'Sent — the tank confirms by showing the new values.':'Could not reach the hub.'}\n"
   "async function saveQuiet(){if(await tset(6,$('#tQf').value)&&await tset(7,$('#tQt').value))toast('Quiet hours sent')}\n"
+  "async function saveLeds(){const n=Math.round(+$('#tLeds').value);if(!(n>=1&&n<=8)){toast('Choose 1 to 8 LEDs');return}if(await tset(9,n))toast('Sent')}\n"
+  "async function saveShow(){const b=Math.round(+$('#tMb').value);if(!(b>=1&&b<=60)){toast('Brightness must be 1 to 60');return}\n"
+  "  if(await tset(10,$('#tSf').value)&&await tset(11,$('#tSt').value)&&await tset(12,b))toast('Daytime display sent')}\n"
   "async function tankBuzzer(el){const on=!el.classList.contains('on');el.classList.toggle('on',on);if(!await tset(5,on?1:0))el.classList.toggle('on',!on)}\n"
   "async function tankSilence(){if(await cmd(tankMac,11))toast('Alarm silenced')}\n"
   "async function tankBeep(){if(await cmd(tankMac,12))toast('Beep!')}\n"
   "async function tankRename(){const n=$('#tName').value.trim();if(!n)return;if(await cmd(tankMac,4,{text:n}))toast('Name saved')}\n"
+  "\n"
+  "/* tap a home card (but not its buttons) to open the device page */\n"
+  "function cardOpen(ev,kind,mac){if(ev.target.closest('button'))return;if(kind==='tank')openTank(mac);else openSw(mac)}\n"
+  "\n"
+  "/* switch detail page */\n"
+  "let swMac='',swKey='';\n"
+  "function openSw(m){swMac=m;nav('sw')}\n"
+  "function swDev(){return S.devices.find(x=>x.mac===swMac)}\n"
+  "function renderSw(){\n"
+  "  const d=swDev();if(!d){nav('home');return}\n"
+  "  const on=d.online,rl=d.relays||[];\n"
+  "  $('#swlive').innerHTML=`<div class=\"card ${on?'':'offline'}\">\n"
+  "    <div class=\"chead\"><span class=\"dot ${on?'on':'off'}\"></span><span class=\"nm\">${esc(d.name)}</span><span class=\"w\">${totalW(d).toFixed(0)} W</span></div>\n"
+  "    ${rl.map((r,i)=>`<div class=\"rel\"><div class=\"n\"><b>${esc(r.name)}${r.used===false?' <span class=\"meta\">(not in use)</span>':''}</b><span class=\"meta\">${r.on?('On · '+r.watts+' W'+(r.onSecs?' · '+up(r.onSecs):'')):'Off'}</span></div>\n"
+  "      <button class=\"tgl ${r.on?'on':''}\" ${on?'':'disabled'} onclick=\"tog(this,'${d.mac}',${i},${!r.on})\"></button></div>`).join('')||'<div class=\"meta\">Waiting for relay info…</div>'}\n"
+  "    <div class=\"row\"><button class=\"btn\" ${on?'':'disabled'} onclick=\"cmd(swMac,2,{val:1})\">All on</button><button class=\"btn\" ${on?'':'disabled'} onclick=\"cmd(swMac,2,{val:0})\">All off</button></div>\n"
+  "    <div class=\"kv\" style=\"margin-top:8px\"><span>Signal</span><b>${on?d.rssi+' dBm':'offline'}</b></div>\n"
+  "    <div class=\"kv\"><span>Up</span><b>${up(d.uptime||0)}</b></div>\n"
+  "    <div class=\"kv\"><span>Firmware</span><b>${esc(d.fw||'')}</b></div></div>`;\n"
+  "  const key=JSON.stringify(rl.map(r=>[r.name,r.watts,r.used,r.gpio]))+d.touch+d.name;\n"
+  "  if(key===swKey||$('#swset').contains(document.activeElement))return;\n"
+  "  swKey=key;\n"
+  "  $('#swset').innerHTML=`\n"
+  "  <h3>Relays${q('Each relay is one output of the switch. Give it the name of what it powers and its watts (used for the power total on Home).')}</h3>\n"
+  "  <div class=\"card\">\n"
+  "    ${rl.map((r,i)=>`<div style=\"padding:8px 0;border-bottom:1px dashed #1e2731\">\n"
+  "      <div class=\"switchrow\" style=\"margin:0\"><span><b>Relay ${i+1}</b> <span class=\"meta\">GPIO ${r.gpio}</span></span><span class=\"meta\" style=\"flex:0 0 auto\">In use${q('Switch this off for a relay with nothing connected: it is hidden on the Home page and skipped by All on. You can still switch it here.')}</span>\n"
+  "        <button class=\"tgl ${r.used===false?'':'on'}\" onclick=\"relUse(this,${i})\"></button></div>\n"
+  "      <div class=\"row\" style=\"margin-top:6px\"><input value=\"${esc(r.name)}\" data-r=\"${i}n\" placeholder=\"Name\"><input type=\"number\" value=\"${r.watts}\" style=\"flex:0 0 80px\" data-r=\"${i}w\" title=\"Watts\">\n"
+  "        <button class=\"btn\" style=\"flex:0 0 64px\" onclick=\"relMeta(swMac,${i},this).then(()=>toast('Saved'))\">Save</button></div></div>`).join('')}\n"
+  "  </div>\n"
+  "  ${d.touch!==undefined?`<h3>Touch buttons${q('Touch pads wired to GPIO 4–7 of the switch. When on, touching pad 1–4 toggles relay 1–4 directly on the switch, even if the hub is off. Leave off until the pads are connected.')}</h3><div class=\"card\"><div class=\"switchrow\" style=\"margin:0\"><span>Touch pads on the switch</span>\n"
+  "    <button class=\"tgl ${d.touch?'on':''}\" onclick=\"cmd(swMac,9,{val:${d.touch?0:1}})\"></button></div></div>`:''}\n"
+  "  <h3>Device</h3>\n"
+  "  <div class=\"card\">\n"
+  "    <label>Name${q('The name shown in the app and in the Activity log.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><input id=\"swName\" value=\"${esc(d.name)}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"swRename()\">Save</button></div>\n"
+  "    <div class=\"row\"><button class=\"btn\" onclick=\"cmd(swMac,3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart the switch? All relays turn OFF.'))cmd(swMac,6)\">Restart</button></div>\n"
+  "    <div class=\"row\"><button class=\"btn\" onclick=\"nav('devices')\">Update / forget…</button></div>\n"
+  "    <p class=\"note\">Identify flashes the switch's LED so you can find it. Restart turns every relay off.</p>\n"
+  "  </div>`;\n"
+  "}\n"
+  "async function relUse(el,i){const u=!el.classList.contains('on');el.classList.toggle('on',u);if(!await post('/api/relayuse',{mac:swMac,idx:i,used:u}))el.classList.toggle('on',!u)}\n"
+  "async function swRename(){const n=$('#swName').value.trim();if(!n)return;if(await cmd(swMac,4,{text:n}))toast('Name saved')}\n"
   "</script>\n"
   "</body>\n"
   "</html>\n"
@@ -1122,6 +1204,9 @@ void webBegin() {
   }));
 
   /* ---- read APIs ---- */
+  server.on("/api/ping", HTTP_GET, [](AsyncWebServerRequest* r) {   // reachability check for the leohub.local switch (no data)
+    r->send(204);
+  });
   server.on("/api/state", HTTP_GET, [](AsyncWebServerRequest* r) {
     if (!authOk(r)) { r->send(401, "application/json", "{\"err\":\"login\"}"); return; }
     r->send(200, "application/json", stateJson());
@@ -1170,7 +1255,7 @@ void webBegin() {
       DevGuard g; Dev& d = devs[i];
       uint8_t m = d.onMask;
       if (cmd == C_RELAY) { if (val) m |= (1 << idx); else m &= ~(1 << idx); }
-      else m = val ? (uint8_t)((1 << (d.n ? d.n : 4)) - 1) : 0;
+      else m = val ? (uint8_t)(((1 << (d.n ? d.n : 4)) - 1) & ~d.hideMask) | (d.onMask & d.hideMask) : 0;   // All on skips relays not in use
       d.expectMask = m; d.expectValid = 1; d.expectAt = millis(); d.onMask = m; stateDirty = true;   // optimistic; the edge confirms
     }
     if (cmd == C_RELAY) activity(dn + ": " + rn + (val ? " ON" : " OFF") + " (from " + who(r) + ")", false);
@@ -1178,11 +1263,28 @@ void webBegin() {
     if (cmd == C_TOUCH) activity(dn + ": touch buttons " + (val ? "enabled" : "disabled") + " (from " + who(r) + ")", false);
     if (cmd == C_SILENCE) activity(dn + ": alarm silenced (from " + who(r) + ")", false);
     if (cmd == C_TANK_SET) {
-      static const char* names[] = { "", "full distance", "empty distance", "full alarm level", "low alarm level", "buzzer", "quiet hours from", "quiet hours until" };
-      String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx <= 2 ? String(f, 1) + " cm" : idx <= 4 ? String((int)f) + " %" : String((int)f) + ":00";
-      if (idx >= 1 && idx <= 7) activity(dn + ": " + names[idx] + " set to " + v + " (from " + who(r) + ")", false);
+      static const char* names[] = { "", "full distance", "empty distance", "full alarm level", "low alarm level", "buzzer", "quiet hours from", "quiet hours until", "LED colours", "level LEDs", "daytime display from", "daytime display until", "daytime minimum brightness" };
+      String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx == 8 ? String(f != 0 ? "red to green" : "red to blue") : idx == 9 || idx == 12 ? String((int)f) :
+                 idx <= 2 ? String(f, 1) + " cm" : idx <= 4 ? String((int)f) + " %" : String((int)f) + ":00";
+      if (idx >= 1 && idx <= 12) activity(dn + ": " + names[idx] + " set to " + v + " (from " + who(r) + ")", false);
     }
-    queueCmd(mac, cmd, idx, val, f, text.c_str());
+    uint8_t hide; { DevGuard g; hide = devs[i].hideMask; }
+    if (cmd == C_ALL && val && hide) {                        // All on with unused relays: switch on only the ones in use
+      uint8_t n; { DevGuard g; n = devs[i].n ? devs[i].n : 4; }
+      for (int k = 0; k < n; ++k) if (!(hide & (1 << k))) queueCmd(mac, C_RELAY, k, 1, 0, "");
+    } else queueCmd(mac, cmd, idx, val, f, text.c_str());
+    jsonOk(r);
+  }));
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/relayuse", [](AsyncWebServerRequest* r, JsonVariant& j) {
+    if (!guard(r)) return;
+    uint8_t mac[6]; if (!parseMac(j["mac"] | "", mac)) { r->send(400); return; }
+    int idx = j["idx"] | -1; bool used = j["used"] | true;
+    int i; String dn, rn;
+    { DevGuard g; i = findDev(mac); if (i < 0 || idx < 0 || idx > 3) { r->send(400); return; }
+      if (used) devs[i].hideMask &= ~(1 << idx); else devs[i].hideMask |= (1 << idx);
+      dn = devs[i].name; rn = relayName(devs[i], idx); }
+    devsSave(); stateDirty = true;
+    activity(dn + ": " + rn + (used ? " marked in use" : " marked not in use (hidden)") + " (from " + who(r) + ")", false);
     jsonOk(r);
   }));
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/forget", [](AsyncWebServerRequest* r, JsonVariant& j) {

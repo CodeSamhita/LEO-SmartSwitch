@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.4.0-tank"
+#define EDGE_FW           "1.5.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -49,7 +49,7 @@
 #define BUZZER_PIN        10
 #define LED_PIN           2
 #define NUM_LEDS          9
-#define LEVEL_LEDS        7
+#define MAX_LEVEL_LEDS    8           // LED 8 is the status LED; the level uses LEDs 0..ledCount-1
 #define STATUS_LED        8
 #define STATE_MS          2000        // report to the hub
 #define HUB_SILENT_MS     10000       // no verified packet from the hub this long -> search again
@@ -72,7 +72,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12 };   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo, value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12 };   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright, value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -81,7 +81,7 @@ struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t roo
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
-struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; };   // tank settings
+struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; };   // tank settings (palette 0 red-blue, 1 red-green; tank 1.5+)
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -125,6 +125,10 @@ uint8_t fullPct = 95, lowPct = 10;                    // alarm levels   (Prefere
 bool    buzzerOn = true;                              // buzzer enabled (Preferences "bz")
 uint8_t quietFrom = 22, quietTo = 6;                  // buzzer quiet hours, from == to -> none ("qf" / "qt")
 uint32_t beepUntil = 0;                               // "test buzzer" from the web app
+uint8_t palette = 0;                                  // level colours: 0 red->blue, 1 red->green ("pal")
+uint8_t ledCount = 7;                                 // LEDs used for the level, 1..8 ("leds")
+uint8_t showFrom = 7, showTo = 22;                    // daytime hours: level LEDs never go fully dark ("sf" / "st"; from == to -> off)
+uint8_t minBright = 6;                                // ... at least this bright (1..60, "mb")
 
 QueueHandle_t rxq;
 Preferences prefs;
@@ -157,7 +161,7 @@ bool     otaActive = false; uint32_t otaSize = 0, otaWritten = 0;
 float    distCm = 0, levelPct = 0;
 bool     sensorOk = false;              // false until the first good measurement
 uint8_t  goodStreak = 0, badStreak = 0;
-uint8_t  levelLeds = 0;                 // 0..LEVEL_LEDS
+uint8_t  levelLeds = 0;                 // 0..ledCount
 int      ldrRaw = 0;
 TankState tstate = T_BOOT;
 AlertKind alertNow = A_NONE;            // alert currently sounding
@@ -184,6 +188,11 @@ bool quietHours() {
   int a = quietFrom * 60, b = quietTo * 60;
   return a < b ? (m >= a && m < b) : (m >= a || m < b);       // window may cross midnight
 }
+bool inShowHours() {                                     // daytime window for the minimum level brightness
+  int m = clockMins(); if (m < 0 || showFrom == showTo) return false;
+  int a = showFrom * 60, b = showTo * 60;
+  return a < b ? (m >= a && m < b) : (m >= a || m < b);
+}
 bool buzzerAllowed() { return buzzerOn && roomLit() && !quietHours(); }
 
 /* ------------------------------ sensors ---------------------------- */
@@ -199,7 +208,7 @@ float pingOnceCm() {                    // one HC-SR04 ping; <0 = no echo
 void recomputeLevel() {                 // distance -> % with the current calibration
   float pct = (tankEmptyCm - distCm) * 100.0f / (tankEmptyCm - tankFullCm);
   pct = constrain(pct, 0.0f, 100.0f);
-  uint8_t leds = (uint8_t)roundf(pct * LEVEL_LEDS / 100.0f);
+  uint8_t leds = (uint8_t)roundf(pct * ledCount / 100.0f);
   if (leds != levelLeds || fabsf(levelPct - pct) >= 1) stateDirty = true;
   levelPct = pct; levelLeds = leds;
 }
@@ -275,7 +284,11 @@ void buttonTick() {
 }
 
 /* ------------------------------ LEDs ------------------------------- */
-const uint8_t GRAD[LEVEL_LEDS][3] = { {255,0,0}, {223,0,32}, {159,0,96}, {128,0,128}, {64,0,191}, {32,0,223}, {0,0,255} };
+// level colours: red at the bottom fading to blue (palette 0) or green (palette 1) at the top
+void gradColor(int i, uint8_t& r, uint8_t& g, uint8_t& b) {
+  float t = ledCount > 1 ? (float)i / (ledCount - 1) : 1;
+  r = (uint8_t)(255 * (1 - t)); g = palette == 1 ? (uint8_t)(255 * t) : 0; b = palette == 1 ? 0 : (uint8_t)(255 * t);
+}
 float daylight() { return roomLit() ? 1 : 0; }           // the tank's own LDR is the room's light sensor
 uint8_t breathLevel(uint32_t period, uint8_t peak) {     // quick sine breath at the start of each period
   uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = beatMillis() % period;   // on the hub's beat
@@ -287,17 +300,18 @@ void ledTick() {
   static uint32_t last = 0; if (millis() - last < 30) return; last = millis();
   // level brightness follows the room, like the original: dark room -> level LEDs off
   int br = map(ldrRaw, 10, 4000, 1, 255); br = constrain(br, 0, 255); if (br < 3) br = 0;
+  if (inShowHours() && br < minBright) br = minBright;                 // daytime: always show the level, dimly
   uint32_t c[NUM_LEDS]; for (int i = 0; i < NUM_LEDS; ++i) c[i] = 0;
   auto scaled = [&](uint8_t r, uint8_t g, uint8_t b, int k) { return strip.Color(r * k / 255, g * k / 255, b * k / 255); };
 
   if (millis() < identifyUntil) {
     bool on = (millis() / 150) % 2; for (int i = 0; i < NUM_LEDS; ++i) c[i] = on ? strip.Color(60, 60, 60) : 0;
   } else if (millis() < btnFeedbackUntil) {
-    for (int i = 0; i < LEVEL_LEDS; ++i) c[i] = scaled(128, 0, 128, max(br, 20));     // purple = button seen
+    for (int i = 0; i < ledCount; ++i) c[i] = scaled(128, 0, 128, max(br, 20));     // purple = button seen
   } else if (alertNow && alertOn) {
-    for (int i = 0; i < LEVEL_LEDS; ++i) c[i] = alertNow == A_FULL ? scaled(0, 255, 0, max(br, 20)) : scaled(255, 0, 0, max(br, 20));
+    for (int i = 0; i < ledCount; ++i) c[i] = alertNow == A_FULL ? scaled(0, 255, 0, max(br, 20)) : scaled(255, 0, 0, max(br, 20));
   } else if (sensorOk) {
-    for (int i = 0; i < levelLeds && i < LEVEL_LEDS; ++i) c[i] = scaled(GRAD[i][0], GRAD[i][1], GRAD[i][2], br);
+    for (int i = 0; i < levelLeds && i < ledCount; ++i) { uint8_t r, g, b; gradColor(i, r, g, b); c[i] = scaled(r, g, b, br); }
   }
   // LED 8: faint quick breath, same scheme as the LEO switch; red = sensor fault
   uint8_t r, g, b; uint32_t period;
@@ -366,7 +380,8 @@ void sendState() {
 void sendTankInfo() {                   // our settings, so the hub web app can show and edit them
   MsgTankInfo m = {}; fillHdr(m.h, M_TANK_INFO);
   m.fullCm = tankFullCm; m.emptyCm = tankEmptyCm; m.fullPct = fullPct; m.lowPct = lowPct;
-  m.buzzer = buzzerOn ? 1 : 0; m.quietFrom = quietFrom; m.quietTo = quietTo;
+  m.buzzer = buzzerOn ? 1 : 0; m.quietFrom = quietFrom; m.quietTo = quietTo; m.palette = palette; m.ledCount = ledCount;
+  m.showFrom = showFrom; m.showTo = showTo; m.minBright = minBright;
   sendHub(&m, sizeof(m));
 }
 void applySetting(uint8_t idx, float v) {
@@ -378,6 +393,11 @@ void applySetting(uint8_t idx, float v) {
     case 5: buzzerOn = v != 0; prefs.putBool("bz", buzzerOn); if (!buzzerOn && !beepUntil) buzzer(false); break;
     case 6: if (v >= 0 && v < 24) { quietFrom = (uint8_t)v; prefs.putUChar("qf", quietFrom); } break;
     case 7: if (v >= 0 && v < 24) { quietTo = (uint8_t)v; prefs.putUChar("qt", quietTo); } break;
+    case 8: palette = v != 0 ? 1 : 0; prefs.putUChar("pal", palette); break;
+    case 9: if (v >= 1 && v <= MAX_LEVEL_LEDS) { ledCount = (uint8_t)v; prefs.putUChar("leds", ledCount); if (sensorOk) recomputeLevel(); } break;
+    case 10: if (v >= 0 && v < 24) { showFrom = (uint8_t)v; prefs.putUChar("sf", showFrom); } break;
+    case 11: if (v >= 0 && v < 24) { showTo = (uint8_t)v; prefs.putUChar("st", showTo); } break;
+    case 12: if (v >= 1 && v <= 60) { minBright = (uint8_t)v; prefs.putUChar("mb", minBright); } break;
   }
   if (idx <= 2 && sensorOk) recomputeLevel();
   dbg("Setting " + String(idx) + " = " + String(v, 1));
@@ -544,6 +564,10 @@ void setup() {
   if (fullPct > 100 || lowPct + 10 >= fullPct) { fullPct = 95; lowPct = 10; }
   buzzerOn = prefs.getBool("bz", true);
   quietFrom = prefs.getUChar("qf", quietFrom) % 24; quietTo = prefs.getUChar("qt", quietTo) % 24;
+  palette = prefs.getUChar("pal", 0) ? 1 : 0;
+  ledCount = prefs.getUChar("leds", 7); if (ledCount < 1 || ledCount > MAX_LEVEL_LEDS) ledCount = 7;
+  showFrom = prefs.getUChar("sf", showFrom) % 24; showTo = prefs.getUChar("st", showTo) % 24;
+  minBright = prefs.getUChar("mb", minBright); if (minBright < 1 || minBright > 60) minBright = 6;
   if (prefs.getBytes("hub", hubMac, 6) == 6) hubKnown = true;
   if (prefs.getBytes("key", key, 16) == 16) hasKey = true;
   uint8_t ch = prefs.getUChar("ch", 1);
