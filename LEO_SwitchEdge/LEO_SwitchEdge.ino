@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.8.0-sw"
+#define EDGE_FW           "2.9.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -66,7 +66,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -75,7 +75,7 @@ struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t roo
                                               uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff;
                                               uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
-struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
+struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; uint8_t mode[4]; uint16_t pulseMs[4]; uint8_t activeHigh[4]; uint8_t tmap[4]; uint8_t tact[4]; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; uint8_t highlight; uint8_t gain[8]; uint16_t ldrMin; uint16_t ldrMax; uint8_t buzzMode; uint8_t nightMax; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
 struct __attribute__((packed)) MsgTankRules { LeoHdr h; uint8_t count; uint8_t r[6][6]; };   // alarm rules: on, level %, dir (0 rises to, 1 drops to), pattern, repeats, colour
@@ -115,7 +115,8 @@ size_t leoVerify(const uint8_t* pkt, size_t total, const uint8_t* key, uint32_t 
 }
 /* ===================================================================== */
 
-struct Relay { String name; int gpio; float watts; bool on; uint32_t onSince; };
+// mode 0 = stays ON until turned OFF, 1 = pulse (ON for pulseMs, then OFF by itself); activeHigh 0 = ON drives the pin LOW (most relay boards)
+struct Relay { String name; int gpio; float watts; bool on; uint32_t onSince; uint8_t mode; uint16_t pulseMs; uint8_t activeHigh; };
 Relay relays[RELAY_COUNT];
 String devName = "Smart Switch";
 
@@ -163,26 +164,34 @@ void fillHdr(LeoHdr& h, uint8_t type) { h.magic = LEO_MAGIC; h.proto = LEO_PROTO
 String macStr(const uint8_t* m) { char b[18]; snprintf(b, sizeof(b), "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]); return String(b); }
 
 /* ------------------------------ relays ----------------------------- */
-int relayOffLevel() { return RELAY_ACTIVE_LOW ? HIGH : LOW; }
-int relayOnLevel()  { return RELAY_ACTIVE_LOW ? LOW : HIGH; }
+int relayOffLevel(int i) { return relays[i].activeHigh ? LOW : HIGH; }
+int relayOnLevel(int i)  { return relays[i].activeHigh ? HIGH : LOW; }
 void relaysInit() {
   for (int i = 0; i < RELAY_COUNT; ++i) {
-    digitalWrite(relays[i].gpio, relayOffLevel());     // OFF before enabling the output
+    digitalWrite(relays[i].gpio, relayOffLevel(i));    // OFF before enabling the output
     pinMode(relays[i].gpio, OUTPUT);
-    digitalWrite(relays[i].gpio, relayOffLevel());
+    digitalWrite(relays[i].gpio, relayOffLevel(i));
     relays[i].on = false; relays[i].onSince = 0;
   }
 }
+uint32_t pulseOffAt[RELAY_COUNT];                      // pulse mode: when this relay switches itself OFF
 void relaySet(int i, bool on) {
-  if (i < 0 || i >= RELAY_COUNT || relays[i].on == on) return;
+  if (i < 0 || i >= RELAY_COUNT) return;
+  if (on && relays[i].mode == 1) pulseOffAt[i] = millis() + relays[i].pulseMs;   // (re)start the pulse
+  if (relays[i].on == on) return;
   relays[i].on = on; relays[i].onSince = on ? millis() : 0;
-  digitalWrite(relays[i].gpio, on ? relayOnLevel() : relayOffLevel());
+  if (!on) pulseOffAt[i] = 0;
+  digitalWrite(relays[i].gpio, on ? relayOnLevel(i) : relayOffLevel(i));
   dbg("Relay " + String(i) + " (" + relays[i].name + ") -> " + (on ? "ON" : "OFF"));
   stateDirty = true;
 }
 
+void pulseTick() { for (int i = 0; i < RELAY_COUNT; ++i) if (pulseOffAt[i] && (int32_t)(millis() - pulseOffAt[i]) >= 0) { pulseOffAt[i] = 0; relaySet(i, false); } }
+
 /* ---------------------------- touch buttons ------------------------- */
 bool touchEnabled = false;                             // off until turned on in the app (config.json "touch")
+uint8_t touchMap[RELAY_COUNT] = { 0, 1, 2, 3 };        // pad N controls this relay (255 = nothing)
+uint8_t touchAct[RELAY_COUNT] = { 0, 0, 0, 0 };        // 0 = toggle on each touch, 1 = ON only while touched
 bool touchStable[RELAY_COUNT], touchRaw[RELAY_COUNT]; uint32_t touchChangedAt[RELAY_COUNT];
 bool touchRead(int i) { return (digitalRead(TOUCH_GPIO[i]) == HIGH) == (TOUCH_ACTIVE_HIGH == 1); }
 void touchInit() {
@@ -199,14 +208,17 @@ void touchTick() {
     if (r != touchRaw[i]) { touchRaw[i] = r; touchChangedAt[i] = millis(); continue; }
     if (r != touchStable[i] && millis() - touchChangedAt[i] >= TOUCH_DEBOUNCE_MS) {
       touchStable[i] = r;                            // tracked even when disabled, so enabling never toggles
-      if (r && touchEnabled) { dbg("Touch " + String(i + 1)); relaySet(i, !relays[i].on); }   // toggle on touch, not on release
+      int t = touchMap[i]; if (!touchEnabled || t >= RELAY_COUNT) continue;
+      if (touchAct[i] == 1) { dbg("Touch " + String(i + 1) + (r ? " held" : " released")); relaySet(t, r); }   // ON while touched
+      else if (r) { dbg("Touch " + String(i + 1)); relaySet(t, !relays[t].on); }                              // toggle on touch, not on release
     }
   }
 }
 
 /* ------------------------------ config ----------------------------- */
 void configLoad() {
-  for (int i = 0; i < RELAY_COUNT; ++i) { relays[i].name = RELAY_DEFAULT_NAMES[i]; relays[i].gpio = RELAY_GPIO_POOL[i]; relays[i].watts = 60; }
+  for (int i = 0; i < RELAY_COUNT; ++i) { relays[i].name = RELAY_DEFAULT_NAMES[i]; relays[i].gpio = RELAY_GPIO_POOL[i]; relays[i].watts = 60;
+    relays[i].mode = 0; relays[i].pulseMs = 500; relays[i].activeHigh = RELAY_ACTIVE_LOW ? 0 : 1; }
   File f = LittleFS.open(CFG_FILE, "r"); if (!f) return;
   JsonDocument d; if (deserializeJson(d, f)) { f.close(); return; } f.close();
   devName = d["deviceName"] | devName.c_str();
@@ -219,7 +231,15 @@ void configLoad() {
     for (int k = 0; k < RELAY_COUNT; ++k) if (RELAY_GPIO_POOL[k] == g) ok = true;
     if (ok) relays[i].gpio = g;
     relays[i].watts = o["watts"] | relays[i].watts;
+    relays[i].mode = (o["mode"] | 0) == 1 ? 1 : 0;
+    relays[i].pulseMs = constrain((int)(o["pulseMs"] | 500), 50, 60000);
+    relays[i].activeHigh = (o["activeHigh"] | (int)relays[i].activeHigh) ? 1 : 0;
     i++;
+  }
+  JsonArray tm = d["touchMap"], ta = d["touchAct"];
+  for (int p = 0; p < RELAY_COUNT; ++p) {
+    if (tm && p < (int)tm.size()) { int v = tm[p] | p; touchMap[p] = (v >= 0 && v < RELAY_COUNT) ? v : 255; }
+    if (ta && p < (int)ta.size()) touchAct[p] = (ta[p] | 0) == 1 ? 1 : 0;
   }
 }
 void configSave() {             // rewrite only the keys this edge owns; everything else is kept
@@ -228,7 +248,10 @@ void configSave() {             // rewrite only the keys this edge owns; everyth
   d["deviceName"] = devName;
   d["touch"] = touchEnabled;
   JsonArray a = d["relays"].to<JsonArray>();
-  for (int i = 0; i < RELAY_COUNT; ++i) { JsonObject o = a.add<JsonObject>(); o["name"] = relays[i].name; o["gpio"] = relays[i].gpio; o["watts"] = relays[i].watts; }
+  for (int i = 0; i < RELAY_COUNT; ++i) { JsonObject o = a.add<JsonObject>(); o["name"] = relays[i].name; o["gpio"] = relays[i].gpio; o["watts"] = relays[i].watts;
+    o["mode"] = relays[i].mode; o["pulseMs"] = relays[i].pulseMs; o["activeHigh"] = relays[i].activeHigh; }
+  JsonArray tm = d["touchMap"].to<JsonArray>(), ta = d["touchAct"].to<JsonArray>();
+  for (int p = 0; p < RELAY_COUNT; ++p) { tm.add(touchMap[p] < RELAY_COUNT ? (int)touchMap[p] : -1); ta.add(touchAct[p]); }
   f = LittleFS.open(CFG_FILE, "w"); if (f) { serializeJson(d, f); f.close(); }
 }
 
@@ -266,6 +289,7 @@ void sendInfo() {
   copyStr(m.name, sizeof(m.name), devName.c_str()); copyStr(m.fw, sizeof(m.fw), EDGE_FW); m.n = RELAY_COUNT;
   for (int i = 0; i < RELAY_COUNT; ++i) { copyStr(m.rname[i], sizeof(m.rname[i]), relays[i].name.c_str()); m.watts[i] = relays[i].watts; m.gpio[i] = (uint8_t)relays[i].gpio; }
   m.touch = touchEnabled ? 1 : 0;
+  for (int i = 0; i < RELAY_COUNT; ++i) { m.mode[i] = relays[i].mode; m.pulseMs[i] = relays[i].pulseMs; m.activeHigh[i] = relays[i].activeHigh; m.tmap[i] = touchMap[i]; m.tact[i] = touchAct[i]; }
   sendHub(&m, sizeof(m));
 }
 void sendState() {
@@ -350,6 +374,16 @@ void handleCmd(const MsgCmd& c) {
     case C_FACTORY: factoryReset("requested from the web app"); break;
     case C_TOUCH:   touchEnabled = c.val != 0; configSave(); sendInfo();
                     dbg(String("Touch buttons ") + (touchEnabled ? "enabled" : "disabled")); break;
+    case C_SW_SET: {                                    // idx = field * 16 + relay/pad, value in f
+      int n = c.idx & 15, fld = c.idx >> 4; if (n >= RELAY_COUNT) break;
+      int v = (int)c.f;
+      if (fld == 1) { relaySet(n, false); relays[n].mode = v == 1 ? 1 : 0; }
+      else if (fld == 2) relays[n].pulseMs = constrain(v, 50, 60000);
+      else if (fld == 3) { relays[n].activeHigh = v ? 1 : 0; digitalWrite(relays[n].gpio, relays[n].on ? relayOnLevel(n) : relayOffLevel(n)); }
+      else if (fld == 4) touchMap[n] = (v >= 0 && v < RELAY_COUNT) ? v : 255;
+      else if (fld == 5) touchAct[n] = v == 1 ? 1 : 0;
+      else break;
+      configSave(); sendInfo(); dbg("Switch setting " + String(fld) + "/" + String(n) + " = " + String(v)); break; }
   }
 }
 
@@ -571,6 +605,7 @@ void loop() {
   esp_task_wdt_reset();
   serialTick();
   touchTick();
+  pulseTick();
   resetBtnTick();
   { static uint32_t lastDiag = 0; if (linked && millis() - lastDiag > 60000) { lastDiag = millis(); sendDiag(); } }
   RxItem it; int n = 0;

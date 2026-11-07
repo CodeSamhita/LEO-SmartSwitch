@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.3.1"
+#define HUB_FW            "2.4.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -72,7 +72,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -81,7 +81,7 @@ struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t roo
                                               uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff;
                                               uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
-struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
+struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; uint8_t mode[4]; uint16_t pulseMs[4]; uint8_t activeHigh[4]; uint8_t tmap[4]; uint8_t tact[4]; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; uint8_t highlight; uint8_t gain[8]; uint16_t ldrMin; uint16_t ldrMax; uint8_t buzzMode; uint8_t nightMax; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
 struct __attribute__((packed)) MsgTankRules { LeoHdr h; uint8_t count; uint8_t r[6][6]; };   // alarm rules: on, level %, dir (0 rises to, 1 drops to), pattern, repeats, colour
@@ -139,6 +139,7 @@ struct Dev {
   uint16_t tLdrMin, tLdrMax; bool tLdrKnown;            // light sensor calibration (tank 1.9+)
   uint8_t  tBuzzMode, tNightMax; bool tBzKnown;         // when sounds are allowed, night LED limit (tank 1.10+)
   uint32_t offAt[4];                                    // switch: relay timer, epoch seconds (0 = none)
+  uint8_t  rMode[4], rHigh[4], tMap[4], tAct[4]; uint16_t rPulse[4]; bool swExtKnown;   // switch 2.9+: output mode, pulse, active level, touch mapping
   uint8_t  tHighlight, tGain[8]; bool tGainKnown;   // current-level highlight %, colour-matching brightness per LED (tank 1.7.3+)
   uint8_t  tRules[36]; bool tRulesKnown;    // alarm rules (tank 1.7+): 6 x {on, level, dir, pattern, repeats, color}
   uint8_t  hideMask;                      // switch relays marked "not in use" (hidden, skipped by All on) - saved in devices.json
@@ -745,10 +746,12 @@ void handlePacket(const RxItem& it) {
     if (needInfo) queueCmd(mac, C_INFO, 0, 0, 0, "");
     if (note.length()) activity(note, false);
     if (changed) stateDirty = true;
-  } else if (h->type == M_SW_INFO && blen >= sizeof(MsgSwInfo) - 1) {       // older switches omit 'touch'
+  } else if (h->type == M_SW_INFO && blen >= offsetof(MsgSwInfo, touch)) {   // older switches send fewer fields
     MsgSwInfo m = {}; memcpy(&m, it.data, min(blen, sizeof(m)));
     DevGuard g; Dev& d = devs[i];
-    d.touch = blen >= sizeof(MsgSwInfo) ? (m.touch ? 1 : 0) : 255;
+    d.touch = blen >= offsetof(MsgSwInfo, mode) ? (m.touch ? 1 : 0) : 255;
+    d.swExtKnown = blen >= sizeof(MsgSwInfo);
+    for (int r = 0; r < 4; ++r) { d.rMode[r] = m.mode[r]; d.rPulse[r] = m.pulseMs[r]; d.rHigh[r] = m.activeHigh[r]; d.tMap[r] = m.tmap[r]; d.tAct[r] = m.tact[r]; }
     d.n = m.n > 4 ? 4 : m.n; copyStr(d.fw, sizeof(d.fw), m.fw);
     for (int r = 0; r < 4; ++r) { copyStr(d.rname[r], sizeof(d.rname[r]), m.rname[r]); d.watts[r] = m.watts[r]; d.gpio[r] = m.gpio[r]; }
     d.infoKnown = true; stateDirty = true;
@@ -891,11 +894,13 @@ String stateJson() {
       o["seenAgo"] = v.lastSeen ? (now - v.lastSeen) : 0;
       if (v.type == DEV_SWITCH && v.infoKnown) {
         if (v.touch != 255) o["touch"] = (bool)v.touch;
+        if (v.swExtKnown) { JsonArray tm = o["touchMap"].to<JsonArray>(), ta = o["touchAct"].to<JsonArray>(); for (int p = 0; p < 4; ++p) { tm.add(v.tMap[p] < 4 ? (int)v.tMap[p] : -1); ta.add(v.tAct[p]); } }
         JsonArray rl = o["relays"].to<JsonArray>();
         for (int r = 0; r < v.n; ++r) {
           JsonObject x = rl.add<JsonObject>();
           x["name"] = v.rname[r]; x["watts"] = v.watts[r]; x["gpio"] = v.gpio[r];
           x["on"] = (bool)(v.onMask & (1 << r)); x["onSecs"] = v.onSecs[r]; x["used"] = !(v.hideMask & (1 << r));
+          if (v.swExtKnown) { x["mode"] = v.rMode[r]; x["pulseMs"] = v.rPulse[r]; x["activeHigh"] = v.rHigh[r]; }
           if (v.offAt[r]) { time_t tn = time(nullptr); x["timer"] = v.offAt[r] > (uint32_t)tn ? v.offAt[r] - (uint32_t)tn : 0; }
         }
       } else if (v.type == DEV_TANK) {
@@ -1171,6 +1176,10 @@ static const char INDEX_HTML[] PROGMEM =
   ".savebar{position:fixed;left:12px;right:12px;bottom:calc(var(--navh) + 10px);z-index:55;background:var(--s1);border:1px solid var(--acc);border-radius:14px;padding:8px 10px;display:none;align-items:center;gap:8px;box-shadow:0 6px 24px #000a}\n"
   ".savebar.show{display:flex;animation:tin .2s ease-out}.savebar span{flex:1;font-size:13px;font-weight:600}.savebar .btn{flex:0 0 auto;padding:8px 14px}\n"
   "@media(min-width:760px){.savebar{max-width:496px;left:50%;right:auto;transform:translateX(-50%)}}\n"
+  ".why{background:var(--s2);border-radius:10px;padding:9px 11px;font-size:12.5px;line-height:1.5;margin-top:10px}\n"
+  "fieldset{border:0;padding:0;margin:0;min-width:0}fieldset:disabled{opacity:.45}\n"
+  ".copt{display:flex;align-items:center;gap:12px;width:100%;padding:10px;margin-bottom:6px;border-radius:12px;border:1px solid var(--line);background:var(--s2);color:var(--txt);font:inherit;text-align:left}.copt.on{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}\n"
+  ".strip{display:flex;flex-direction:column-reverse;gap:2px;width:22px;padding:2px;border:1px solid var(--line);border-radius:5px;flex:0 0 auto}.strip i{height:7px;border-radius:2px;display:block}\n"
   ".lab2{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;margin:10px 0 2px}\n"
   ".rdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:0;flex:0 0 auto}\n"
   ".tmb{flex:0 0 34px;height:31px;border-radius:10px;border:1px solid var(--line);background:var(--s2);color:var(--mut);font-size:15px}.tmb.on{color:var(--acc);border-color:var(--acc)}\n"
@@ -1357,7 +1366,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  if(p==='tank'||p==='sw'){const d=S.devices.find(x=>x.mac===m)||S.devices.find(x=>x.type===(p==='tank'?'tank':'switch'));if(!d)return;\n"
   "    if(p==='tank')tankMac=d.mac;else swMac=d.mac;subSel[p]=s||'ov';nav(p)}\n"
   "  else if(['devices','activity','hub'].includes(p))nav(p)}\n"
-  "function nav(p){if(p!==page&&!leaveOk())return;page=p;$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
+  "function nav(p){if(p!==page&&!leaveOk())return;if(p!==page)simStop(true);page=p;$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
   "  $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));\n"
   "  if(p==='devices'){devKeys='';render()} if(p==='hub'){loadHub();logOn()}else logOff(); if(p==='activity')loadActivity();\n"
   "  if(p==='tank'){tsetKey='';renderTank();pageExtras('tank')} if(p==='sw'){swKey='';renderSw();pageExtras('sw')} window.scrollTo({top:0,behavior:'smooth'});route()}\n"
@@ -1392,7 +1401,6 @@ static const char INDEX_HTML[] PROGMEM =
   "        <button class=\"tgl ${r.on?'on':''}\" ${d.online?'':'disabled'} onclick=\"tog(this,'${d.mac}',${i},${!r.on})\"></button></div>`).join('');\n"
   "      return `<div class=\"card click ${d.online?'':'offline'}\" onclick=\"cardOpen(event,'sw','${d.mac}')\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span><span class=\"w\">${totalW(d).toFixed(0)} W</span><span class=\"chev\">›</span></div>\n"
   "        ${rel||'<div class=\"meta\">Waiting for relay info…</div>'}\n"
-  "        <div class=\"row\"><button class=\"btn\" ${d.online?'':'disabled'} onclick=\"cmd('${d.mac}',2,{val:1})\">All on</button><button class=\"btn\" ${d.online?'':'disabled'} onclick=\"cmd('${d.mac}',2,{val:0})\">All off</button></div>\n"
   "        <div class=\"meta\" style=\"margin-top:8px\">${meta}</div></div>`}\n"
   "    if(d.type==='tank'){const t=d.tank||{};\n"
   "      return `<div class=\"card click ${d.online?'':'offline'}\" onclick=\"openTank('${d.mac}')\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span><span class=\"chev\">›</span></div>\n"
@@ -1507,7 +1515,7 @@ static const char INDEX_HTML[] PROGMEM =
   "const TOPIC={tank:{size:'Water level sensor',ldr:'Light sensor',alarms:'Alarm rules',buzzer:'Buzzer',colours:'Level LEDs · colours',level:'Level LEDs · how many & highlight',bright:'Level LEDs · day / night brightness',device:'Name, restart, update',adv:'Advanced'},\n"
   "  sw:{r0:'Relay 1',r1:'Relay 2',r2:'Relay 3',r3:'Relay 4',touch:'Touch pads',device:'Name, restart, update',adv:'Advanced'}};\n"
   "function srow(k,t,ic,label,sum){return `<button class=\"srow\" onclick=\"subTab('${k}','${t}')\"><span class=\"ic\">${ic}</span><span class=\"t\">${label}</span><span class=\"meta\">${sum||''}</span><span class=\"chev\">›</span></button>`}\n"
-  "function subTab(k,t){if(subSel[k]!==t&&!leaveOk())return;const ch=subSel[k]!==t;subSel[k]=t;applySub(k,ch);window.scrollTo({top:0,behavior:'smooth'});if(t==='ov')pageExtras(k);route()}\n"
+  "function subTab(k,t){if(subSel[k]!==t&&!leaveOk())return;if(t!=='adv')simStop(true);const ch=subSel[k]!==t;subSel[k]=t;applySub(k,ch);window.scrollTo({top:0,behavior:'smooth'});if(t==='ov')pageExtras(k);route()}\n"
   "function applySub(k,anim){const sec=$(k==='tank'?'#p-tank':'#p-sw');if(!sec)return;let t=subSel[k];if(t!=='ov'&&t!=='set'&&!TOPIC[k][t])t=subSel[k]='set';\n"
   "  sec.querySelectorAll('[data-tab]').forEach(e=>{const show=e.dataset.tab===t;e.style.display=show?'':'none';if(show&&anim&&e.animate)e.animate([{opacity:0,transform:'translateX(10px)'},{opacity:1,transform:'none'}],{duration:200,easing:'ease-out'})});\n"
   "  sec.querySelectorAll('.subtabs [data-t]').forEach(b=>b.classList.toggle('on',b.dataset.t===t||(b.dataset.t==='set'&&t!=='ov')));\n"
@@ -1529,13 +1537,15 @@ static const char INDEX_HTML[] PROGMEM =
   "function calPct(v){const [lo,hi]=ldrCal();return Math.round(Math.max(0,Math.min(1,(v-lo)/(hi-lo)))*100)}\n"
   "/* slider + number box: drag, or type an exact value; the unit (and % of the range) sits after the box */\n"
   "const SUF={b255:v=>'/255 · '+Math.round(v/2.55)+'%',ldr:v=>'/4095 · '+Math.round(v/40.95)+'%',pct:v=>'%',leds:v=>'of 8',\n"
-  "  lvl:v=>{const n=tcfg().ledCount||7;return '% · '+Math.round(v*n/100)+'/'+n+' LEDs · '+cmOf(v)+' cm'},ldrb:v=>'/4095 → LEDs '+ldrBr(v)+'/255',dark:v=>'/4095'};\n"
+  "  lvl:v=>{const n=tcfg().ledCount||7;return '% · '+Math.round(v*n/100)+'/'+n+' LEDs · '+cmOf(v)+' cm'},ldrb:v=>'/4095 → LEDs '+ldrBr(v)+'/255',dark:v=>'/4095',ms:v=>'ms'};\n"
   "const SMAP={dark:[v=>sq2ldr(v),x=>Math.round(ldr2sq(x))]};   // sliders whose position is not the value itself\n"
   "const slVal=(f,v)=>SMAP[f]?SMAP[f][0](v):v;\n"
   "/* changes are STAGED: a slider/drop-down only shows the new value; nothing is sent until you press Save in the bar\n"
   "   (so a stray touch while scrolling changes nothing). chg starting with '!' = live (simulation). */\n"
   "const pend=new Map();\n"
-  "function stage(el){pend.set(el,el.dataset.chg);$('#savebar').classList.add('show')}\n"
+  "function stage(el){if(el.dataset.grp)for(const k of [...pend.keys()])if(k.dataset.grp===el.dataset.grp)pend.delete(k);pend.delete(el);pend.set(el,el.dataset.chg);$('#savebar').classList.add('show')}\n"
+  "function palPick(el){el.parentElement.querySelectorAll('.copt').forEach(b=>b.classList.toggle('on',b===el));stage(el)}\n"
+  "function palStrip(c,p){const n=c.ledCount||7,cc=Object.assign({},c,{palette:p});return `<span class=\"strip\">${[...Array(n)].map((_,i)=>`<i style=\"background:${ledCol(cc,i,n)}\"></i>`).join('')}</span>`}\n"
   "async function saveStaged(){const list=[...pend];let ok=true;for(const [el,code] of list){try{if(!await (new Function('return '+code)).call(el))ok=false}catch(e){ok=false}}\n"
   "  pend.clear();$('#savebar').classList.remove('show');toast(ok?'Saved ✓':'Some changes could not be saved');tsetKey='';swKey=''}\n"
   "function unstage(){pend.clear();$('#savebar').classList.remove('show');tsetKey='';swKey='';homeKey='';render()}\n"
@@ -1550,28 +1560,55 @@ static const char INDEX_HTML[] PROGMEM =
   "function brNow(){const t=(tankDev()||{}).tank||{},mb=tcfg().minBright||6;let b=t.ldr!=null?ldrBr(t.ldr):0;if(inDay()&&b<mb)b=mb;return b}\n"
   "/* the tank's highlight maths: top LED brighter by half the %, the ones below dimmer by half */\n"
   "function hlVals(h,br){if(!br)return [0,0];if(!h)return [br,br];return [Math.min(255,Math.max(br+1,Math.trunc(br*(200+h)/200))),Math.max(1,Math.trunc(br*(200-h)/200))]}\n"
-  "function hlInfo(h){const el=$('#hlInfo');if(!el)return;if(h==null)h=+(($('#tHl')||{}).value||0);const b=brNow(),[a,o]=hlVals(h,b),[fa,fo]=hlVals(h,255);\n"
-  "  el.innerHTML=`Now: top LED <b>${a}</b>, others <b>${o}</b> (of 255) · In daylight: top <b>${fa}</b>, others <b>${fo}</b>`}\n"
-  "window.on_tHl=hlInfo;\n"
+  "/* level screen: a picture of the strip with these settings (example: water at 60 %, full daylight) */\n"
+  "function hlInfo(h){const el=$('#hlInfo');if(!el)return;const c=tcfg(),n=+(($('#tLeds')||{}).value||c.ledCount||7);if(h==null)h=+(($('#tHl')||{}).value||c.highlight||0);\n"
+  "  const lit=Math.max(1,Math.round(n*0.6)),[ta,tb]=hlVals(h,255),cc=Object.assign({},c,{ledCount:n});\n"
+  "  const strip=[...Array(n)].map((_,i)=>{const on=i<lit,k=i===lit-1?ta:tb,col=ledCol(cc,i,n);return `<i style=\"height:12px;background:${on?col:'#1d2630'};opacity:${on?Math.max(.12,k/255).toFixed(2):1};${on&&i===lit-1&&h?'box-shadow:0 0 7px '+col:''}\"></i>`}).join('');\n"
+  "  el.innerHTML=`<div style=\"display:flex;gap:14px;align-items:center\"><span class=\"strip\" style=\"width:32px\">${strip}</span><div>Example — water at 60 %: <b>${lit} of ${n}</b> LEDs lit (each LED ≈ ${Math.round(100/n)} % of the tank).<br>\n"
+  "    In full daylight the top lit LED is <b>${ta}</b> and the LEDs below it <b>${tb}</b> (of 255).${h?'':'<br>0 % = all lit LEDs equally bright.'}<br><span class=\"meta\">In a dimmer room both scale down together.</span></div></div>`}\n"
+  "window.on_tHl=window.on_tLeds=()=>hlInfo();\n"
   "function tankLive(){const t=(tankDev()||{}).tank||{},mb=tcfg().minBright||6,s=(id,v)=>{const e=$(id);if(e)e.innerHTML=v};\n"
   "  if(t.ldr!=null){const b=ldrBr(t.ldr);s('#ldrNow',`${inDay()&&b<mb?mb:b} / 255`);s('#ldrRaw',`${t.ldr} / 4095`)}\n"
-  "  s('#ldr24',t.ldrLo!=null?`${t.ldrLo} / ${t.ldrHi}`:'collecting…');hlInfo()}\n"
+  "  s('#ldr24',t.ldrLo!=null?`${t.ldrLo} / ${t.ldrHi}`:'collecting…');hlInfo();bzWhen();brWhy()}\n"
+  "/* plain-language 'what happens' lines, computed from the settings and what the tank sees right now */\n"
+  "function inQuiet(){const g=(S.hub||{}).global||{},n=new Date(),m=n.getHours()*60+n.getMinutes(),a=g.quietFrom*60,b=g.quietTo*60;if(a===b)return false;return a<b?(m>=a&&m<b):(m>=a||m<b)}\n"
+  "function bzWhen(){const el=$('#bzWhen');if(!el)return;const c=tcfg(),g=(S.hub||{}).global||{},sel=$('#tBz'),m=sel?+sel.value:(c.buzzMode!=null?c.buzzMode:3);\n"
+  "  if(!c.buzzer){el.innerHTML='🔇 <b>Never sounds</b> — the buzzer is off. Alarms still flash the LEDs.';return}\n"
+  "  const qt=g.quietFrom!==g.quietTo,day=`${h12(g.quietTo)} to ${h12(g.quietFrom)}`,lit=S.hub.room!=='dark';\n"
+  "  const rule=[`🔊 <b>Sounds at any time</b>, day or night, light or dark.`,qt?`🔊 <b>Sounds from ${day}</b>. Silent at night (${h12(g.quietFrom)}–${h12(g.quietTo)}), even if the room is lit.`:'🔊 <b>Sounds at any time</b> (no night hours set).',\n"
+  "    `🔊 <b>Sounds only while the room is lit</b> (light sensor above ${g.litOff}). Silent in a dark room, at any hour.`,`🔊 <b>Sounds from ${day} and only while the room is lit</b>. Silent at night or in a dark room.`][m];\n"
+  "  const tOk=!qt||!inQuiet(),lOk=lit,ok=m==0||(m==1&&tOk)||(m==2&&lOk)||(m==3&&tOk&&lOk);\n"
+  "  el.innerHTML=rule+`<br>Right now: ${ok?'<b style=\"color:var(--good)\">would sound</b>':'<b style=\"color:var(--warn)\">silent</b>'} (${tOk?'daytime':'night hours'}, room ${lit?'lit':'dark'}).`}\n"
+  "function brWhy(){const el=$('#brWhy');if(!el)return;const t=(tankDev()||{}).tank||{},c=tcfg(),mb=+(($('#tMb')||{}).value||c.minBright||6),nm=+(($('#tNm')||{}).value||(c.nightMax!=null?c.nightMax:255));\n"
+  "  if(t.ldr==null){el.textContent='No light reading from the tank yet.';return}const f=ldrBr(t.ldr),day=inDay();let r=f,why='follows the room light';\n"
+  "  if(day&&f<mb){r=mb;why='raised to the daytime minimum'}else if(!day&&f>nm){r=nm;why='lowered to the night maximum'}\n"
+  "  el.innerHTML=`Right now (${hm(new Date())}, ${day?'daytime':'night'}): room light ${t.ldr} → LEDs would be ${f}, ${why} → <b>${r} / 255</b>${r?'':' (off)'}`}\n"
+  "window.on_tMb=window.on_tNm=()=>brWhy();\n"
   "async function ldrUse(i){const t=(tankDev()||{}).tank||{};if(t.ldr==null){toast('No light reading');return}if(await tset(i,t.ldr))toast('Sent: '+t.ldr)}\n"
   "/* Advanced: LED simulation - the real strip shows made-up values for 3 minutes */\n"
   "function simPanel(){const c=tcfg(),t=(tankDev()||{}).tank||{};if(c.ldrMin==null)return '<p class=\"note\">LED simulation needs tank firmware 1.9 or newer.</p>';\n"
   "  return `<h3 style=\"margin-top:16px\">LED simulation${q('Drives the REAL tank LEDs with the values below for 3 minutes, so you can see how any water level and room light looks. Nothing is saved and no alarm sounds; the app keeps showing the real level. Press Stop, or wait 3 minutes, to go back to normal. The preview here shows the same thing.')}</h3>\n"
+  "  <div class=\"row\" style=\"margin:0 0 10px\"><button class=\"btn ${simOn?'d':'p'}\" id=\"simBtn\" onclick=\"simOn?simStop():simStart()\">${simOn?'■ Stop simulation':'▶ Start simulation'}</button></div>\n"
+  "  <fieldset id=\"simF\" ${simOn?'':'disabled'}>\n"
   "  <div id=\"simBar\"></div>\n"
   "  <label>Water level</label>${sl('sLv',0,100,Math.round(t.level||50),'lvl','!tset(40,this.value)',200)}\n"
   "  <label>Light sensor</label>${sl('sLdr',0,4095,t.ldr!=null?t.ldr:2000,'ldrb','!tset(41,this.value)',200)}\n"
   "  <div class=\"switchrow\"><span>Daytime hours (minimum brightness)</span><button class=\"tgl ${inDay()?'on':''}\" id=\"sDay\" onclick=\"this.classList.toggle('on');tset(42,this.classList.contains('on')?1:0);simBar()\"></button></div>\n"
   "  <div class=\"switchrow\"><span>Sensor fault (yellow blink)</span><button class=\"tgl\" id=\"sFault\" onclick=\"this.classList.toggle('on');tset(43,this.classList.contains('on')?1:0);simBar()\"></button></div>\n"
-  "  <div class=\"row\"><button class=\"btn p\" onclick=\"simStart()\">Start (3 min)</button><button class=\"btn\" onclick=\"tset(44,0).then(()=>toast('Simulation stopped'))\">Stop</button></div>`}\n"
+  "  </fieldset>\n"
+  "  <p class=\"meta\">Stops by itself after 3 minutes, or when you leave this screen.</p>`}\n"
   "window.on_sLv=window.on_sLdr=()=>simBar();\n"
   "function simBar(){const el=$('#simBar');if(!el)return;const c=tcfg(),mb=c.minBright||6,lv=+$('#sLv').value,f=$('#sFault').classList.contains('on'),b=ldrBr(+$('#sLdr').value),br=$('#sDay').classList.contains('on')&&b<mb?mb:b;\n"
   "  el.innerHTML=`<div class=\"tank\" style=\"align-items:center\">${tankBar({tank:{level:lv,sensorOk:!f,cfg:c}},110)}<div class=\"meta\">Brightness ${br} / 255${br?'':' — LEDs off (dark room)'}</div></div>`}\n"
+  "let simOn=false,simT=null;\n"
+  "function simUi(){const b=$('#simBtn'),f=$('#simF');if(b){b.className='btn '+(simOn?'d':'p');b.textContent=simOn?'■ Stop simulation':'▶ Start simulation'}if(f)f.disabled=!simOn}\n"
   "async function simStart(){const on=id=>$(id).classList.contains('on')?1:0;\n"
   "  const ok=await tset(40,$('#sLv').value)&&await tset(41,$('#sLdr').value)&&await tset(42,on('#sDay'))&&await tset(43,on('#sFault'))&&await tset(44,180);\n"
-  "  toast(ok?'Simulation running on the tank for 3 minutes':'Could not reach the hub')}\n"
+  "  if(!ok){toast('Could not reach the hub');return}simOn=true;simUi();clearTimeout(simT);simT=setTimeout(()=>{simOn=false;simUi()},180000);toast('Simulation running on the tank')}\n"
+  "function simStop(quiet){if(!simOn)return;simOn=false;clearTimeout(simT);simUi();\n"
+  "  if(quiet)fetch('/api/cmd',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({mac:tankMac,cmd:10,idx:44,f:0})}).catch(()=>{});\n"
+  "  else tset(44,0).then(()=>toast('Simulation stopped'))}\n"
+  "addEventListener('pagehide',()=>simStop(true));document.addEventListener('visibilitychange',()=>{if(document.hidden)simStop(true)});\n"
   "function hrs(v){return [...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${h12(h)}</option>`).join('')}\n"
   "/* the tank bar in the app looks like the real strip: same number of level LEDs, same colours, yellow when the sensor fails */\n"
   "function ledCol(c,i,n){if(c&&c.palette==2&&c.colors&&c.colors[i])return c.colors[i];if(c&&c.palette==3)return 'hsl('+Math.round((n>1?i/(n-1):1)*240)+',100%,50%)';const t=n>1?i/(n-1):1,r=Math.round(255*(1-t)),v=Math.round(255*t);\n"
@@ -1644,12 +1681,13 @@ static const char INDEX_HTML[] PROGMEM =
   "  </div><div data-tab=\"buzzer\">\n"
   "  <div class=\"card\">\n"
   "    <div class=\"switchrow\" style=\"margin-top:0\"><span>Buzzer</span><button class=\"tgl ${c.buzzer?'on':''}\" onclick=\"tankBuzzer(this)\"></button></div>\n"
-  "    ${c.buzzMode!=null?`<label>Buzzer may sound</label><select data-chg=\"tset(33,this.value)\" onchange=\"stage(this);this.blur()\">${opts(['Always','By time (not in night hours)','By room light (only when lit)','By time and room light'],c.buzzMode)}</select>`:''}\n"
-  "    ${globalNote(`Night ${h12(G.quietFrom)}–${h12(G.quietTo)}`)}\n"
+  "    ${c.buzzMode!=null?`<label>Buzzer may sound</label><select id=\"tBz\" data-chg=\"tset(33,this.value)\" onchange=\"stage(this);this.blur();bzWhen()\">${opts(['Always','By time (not in night hours)','By room light (only when lit)','By time and room light'],c.buzzMode)}</select>`:''}\n"
+  "    <div class=\"why\" id=\"bzWhen\"></div>\n"
   "  </div>\n"
   "  </div><div data-tab=\"colours\">\n"
   "  <div class=\"card\">\n"
-  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn ${c.palette==0?'p':''}\" onclick=\"tset(8,0)\">Red → Blue</button><button class=\"btn ${c.palette==1?'p':''}\" onclick=\"tset(8,1)\">Red → Green</button><button class=\"btn ${c.palette==3?'p':''}\" onclick=\"tset(8,3)\">Spectrum</button>${c.colors?`<button class=\"btn ${c.palette==2?'p':''}\" onclick=\"tset(8,2)\">Custom</button>`:''}</div>\n"
+  "    ${[[3,'Spectrum','red → orange → yellow → green → cyan → blue'],[0,'Red → Blue','red at the bottom, fading to blue at the top'],[1,'Red → Green','red at the bottom, fading to green at the top']].concat(c.colors?[[2,'Custom','your own colour for every LED (pick them below)']]:[])\n"
+  "      .map(([p,n,dsc])=>`<button class=\"copt ${c.palette==p?'on':''}\" data-grp=\"pal\" data-chg=\"tset(8,${p})\" onclick=\"palPick(this)\">${palStrip(c,p)}<span style=\"flex:1\"><b>${n}</b><br><span class=\"meta\">${dsc}</span></span></button>`).join('')}\n"
   "    ${c.palette==2&&c.colors?`<div style=\"margin-top:10px\">${c.colors.slice(0,c.ledCount||7).map((col,i)=>`<div class=\"switchrow\" style=\"margin:4px 0\"><span>LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
   "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).reverse().join('')}\n"
   "      <div class=\"row\"><button class=\"btn\" onclick=\"presetColors()\">Preset: Red · greens · Blue</button><button class=\"btn p\" onclick=\"saveColors()\">Save colours</button></div>\n"
@@ -1660,15 +1698,19 @@ static const char INDEX_HTML[] PROGMEM =
   "    <label style=\"margin-top:0\">Number of LEDs that show the water level</label>\n"
   "    ${sl('tLeds',1,8,c.ledCount||7,'leds','tset(9,this.value)',60)}\n"
   "    ${c.gain?`<label>Top lit LED (the current level) stands out by</label>\n"
-  "    ${sl('tHl',0,100,c.highlight,'pct','tset(21,this.value)',60)}<p class=\"note\" id=\"hlInfo\"></p>`:''}\n"
+  "    ${sl('tHl',0,100,c.highlight,'pct','tset(21,this.value)',60)}`:''}\n"
+  "    <div class=\"why\" id=\"hlInfo\"></div>\n"
   "  </div>\n"
   "  </div><div data-tab=\"bright\">\n"
   "  <div class=\"card\">\n"
-  "    <div class=\"lab2\" style=\"margin-top:0\"><span>☀ Daytime: level LEDs never dimmer than</span></div><div class=\"meta\">${h12(G.dayFrom)}–${h12(G.dayTo)}</div>\n"
+  "    <p class=\"why\" style=\"margin-top:0\">The level LEDs follow the room light: dark room → off, bright room → full (255). These two limits change that:</p>\n"
+  "    <div class=\"lab2\"><span>☀ ${h12(G.dayFrom)}–${h12(G.dayTo)}: never dimmer than</span></div>\n"
   "    ${sl('tMb',1,60,c.minBright||6,'b255','tset(12,this.value)',130)}\n"
-  "    ${c.nightMax!=null?`<div class=\"lab2\"><span>☾ Night: level LEDs never brighter than</span></div><div class=\"meta\">${h12(G.dayTo)}–${h12(G.dayFrom)} · 0 = off at night</div>\n"
-  "    ${sl('tNm',0,255,c.nightMax,'b255','tset(34,this.value)',130)}`:''}\n"
-  "    <div class=\"kv\" style=\"margin-top:8px\"><span>Level LEDs right now</span><b id=\"ldrNow\">—</b></div>\n"
+  "    <div class=\"meta\">so you can always see the level during the day, even in a dark room</div>\n"
+  "    ${c.nightMax!=null?`<div class=\"lab2\"><span>☾ ${h12(G.dayTo)}–${h12(G.dayFrom)}: never brighter than</span></div>\n"
+  "    ${sl('tNm',0,255,c.nightMax,'b255','tset(34,this.value)',130)}\n"
+  "    <div class=\"meta\">so they don't light up the room at night · 0 = off at night</div>`:''}\n"
+  "    <div class=\"why\" id=\"brWhy\" style=\"margin-top:12px\"></div>\n"
   "  </div>\n"
   "  </div><div data-tab=\"ldr\">\n"
   "  <div class=\"card\">\n"
@@ -1679,7 +1721,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    ${sl('tLmn',0,4000,c.ldrMin,'ldr','tset(31,this.value)',130)}\n"
   "    <label>Level LEDs at FULL brightness at this reading or brighter</label>\n"
   "    ${sl('tLmx',50,4095,c.ldrMax,'ldr','tset(32,this.value)',130)}\n"
-  "    <div class=\"row\"><button class=\"btn\" onclick=\"ldrUse(31)\">Use reading now for OFF</button><button class=\"btn\" onclick=\"ldrUse(32)\">Use reading now for FULL</button></div>`:''}\n"
+  "    `:''}\n"
   "    ${globalNote('Room counts as dark (for every device) below '+((S.hub.global||{}).litOff||'?'))}\n"
   "  </div>\n"
   "  </div><div data-tab=\"size\">\n"
@@ -1783,19 +1825,18 @@ static const char INDEX_HTML[] PROGMEM =
   "      <button class=\"tgl ${r.on?'on':''}\" ${on?'':'disabled'} onclick=\"tog(this,'${d.mac}',${i},${!r.on})\"></button></div>\n"
   "      ${tmOpen===i?`<div class=\"tmp\"><div class=\"meta\">${r.on?'Turn off in':'Turn on for'}</div><div class=\"row\" style=\"margin-top:4px;gap:6px\">${[15,30,60,120,240].map(m=>`<button class=\"btn\" style=\"padding:7px 0\" onclick=\"tmGo(${i},${m},${r.on})\">${m<60?m+'m':m/60+'h'}</button>`).join('')}</div>\n"
   "        <div class=\"row\" style=\"gap:6px;align-items:center\"><span class=\"meta\" style=\"flex:0 0 auto\">Off at</span><input type=\"time\" id=\"tmAt\" value=\"23:00\"><button class=\"btn p\" style=\"flex:0 0 64px\" onclick=\"tmAt(${i},${r.on})\">Set</button>${r.timer!=null?`<button class=\"btn d\" style=\"flex:0 0 70px\" onclick=\"tmCancel(${i})\">Cancel</button>`:''}</div></div>`:''}`).join('')||'<div class=\"meta\">Waiting for relay info…</div>'}\n"
-  "    <div class=\"row\"><button class=\"btn\" ${on?'':'disabled'} onclick=\"cmd(swMac,2,{val:1})\">All on</button><button class=\"btn\" ${on?'':'disabled'} onclick=\"cmd(swMac,2,{val:0})\">All off</button></div>\n"
   "    <div class=\"kv\" style=\"margin-top:8px\"><span>Signal</span><b>${on?d.rssi+' dBm':'offline'}</b></div>\n"
   "    <div class=\"kv\"><span>Up</span><b>${up(d.uptime||0)}</b></div>\n"
   "    <div class=\"kv\"><span>Firmware</span><b>${esc(d.fw||'')}</b></div></div>`;\n"
-  "  const key=JSON.stringify(rl.map(r=>[r.name,r.watts,r.used,r.gpio]))+d.touch+d.name+JSON.stringify((S.hub||{}).global||{});\n"
+  "  const key=JSON.stringify(rl.map(r=>[r.name,r.watts,r.used,r.gpio,r.mode,r.pulseMs,r.activeHigh]))+d.touch+JSON.stringify([d.touchMap,d.touchAct])+d.name+JSON.stringify((S.hub||{}).global||{});\n"
   "  if(key===swKey||typing('#swset'))return;\n"
   "  swKey=key;\n"
   "  $('#swset').innerHTML=`\n"
   "  <div data-tab=\"set\" class=\"card slist\">\n"
   "    <div class=\"sgrp\">Relays</div>\n"
-  "    ${rl.map((r,i)=>srow('sw','r'+i,`<span class=\"rdot\" style=\"background:${RCOL[i]};margin:0\"></span>`,esc(r.name),r.used===false?'not in use':r.watts+' W')).join('')}\n"
+  "    ${rl.map((r,i)=>srow('sw','r'+i,`<span class=\"rdot\" style=\"background:${RCOL[i]};margin:0\"></span>`,esc(r.name),r.used===false?'not in use':r.watts+' W'+(r.mode==1?' · pulse':''))).join('')}\n"
   "    <div class=\"sgrp\">Device</div>\n"
-  "    ${d.touch!==undefined?srow('sw','touch','👆','Touch pads',d.touch?'On':'Off'):''}\n"
+  "    ${d.touch!==undefined?srow('sw','touch','👆','Touch pads',d.touch?'on':'off'):''}\n"
   "    ${srow('sw','device','✎','Name & device',esc(d.name))}\n"
   "    ${srow('sw','adv','⚙','Advanced','chip · reset')}\n"
   "  </div>\n"
@@ -1804,11 +1845,18 @@ static const char INDEX_HTML[] PROGMEM =
   "      <label style=\"margin-top:0\">What it powers (name)</label><input value=\"${esc(r.name)}\" data-r=\"${i}n\" placeholder=\"Name\">\n"
   "      <label>Power of the light / fan (watts)</label><input type=\"number\" value=\"${r.watts}\" data-r=\"${i}w\">\n"
   "      <div class=\"row\"><button class=\"btn p\" onclick=\"relMeta(swMac,${i},this.parentElement).then(()=>toast('Saved'))\">Save name &amp; watts</button></div>\n"
-  "      <div class=\"switchrow\" style=\"margin-top:14px\"><span>In use (shown on Home, included in All on)</span><button class=\"tgl ${r.used===false?'':'on'}\" onclick=\"relUse(this,${i})\"></button></div>\n"
+  "      <div class=\"switchrow\" style=\"margin-top:14px\"><span>In use (shown on Home)</span><button class=\"tgl ${r.used===false?'':'on'}\" onclick=\"relUse(this,${i})\"></button></div>\n"
+  "      ${r.mode!=null?`<h3 style=\"margin:16px 0 4px\">Output</h3>\n"
+  "      <label style=\"margin-top:0\">When switched ON</label><select data-chg=\"swset(${16+i},this.value)\" onchange=\"stage(this);this.blur()\">${opts(['Stay ON until switched OFF','Pulse: ON briefly, then OFF by itself'],r.mode)}</select>\n"
+  "      <label>Pulse length (only for pulse)</label>${sl('pl'+i,50,10000,r.pulseMs,'ms','swset('+(32+i)+',this.value)')}\n"
+  "      <label>ON drives the relay pin</label><select data-chg=\"swset(${48+i},this.value)\" onchange=\"stage(this);this.blur()\">${opts(['LOW (most relay boards)','HIGH'],r.activeHigh)}</select>`:''}\n"
   "      <div class=\"kv\" style=\"margin-top:8px\"><span>Output pin</span><b>GPIO ${r.gpio}</b></div></div>`).join('')}\n"
   "  </div><div data-tab=\"touch\">\n"
-  "  ${d.touch!==undefined?`<div class=\"card\"><div class=\"switchrow\" style=\"margin:0\"><span>Touch pads (GPIO 4–7)</span>\n"
-  "    <button class=\"tgl ${d.touch?'on':''}\" onclick=\"cmd(swMac,9,{val:${d.touch?0:1}})\"></button></div></div>`:''}\n"
+  "  ${d.touch!==undefined?`<div class=\"card\"><div class=\"switchrow\" style=\"margin:0\"><span>Touch pads on</span>\n"
+  "    <button class=\"tgl ${d.touch?'on':''}\" onclick=\"cmd(swMac,9,{val:${d.touch?0:1}})\"></button></div>\n"
+  "    ${d.touchMap?d.touchMap.map((m,p)=>`<div class=\"lab2\" style=\"margin-top:14px\"><span>Pad ${p+1}</span><span class=\"meta\">GPIO ${4+p}</span></div>\n"
+  "      <div class=\"row\" style=\"margin:0\"><select data-chg=\"swset(${64+p},this.value)\" onchange=\"stage(this);this.blur()\">${rl.map((r,i)=>`<option value=\"${i}\" ${m==i?'selected':''}>controls ${esc(r.name)}</option>`).join('')}<option value=\"-1\" ${m<0?'selected':''}>does nothing</option></select>\n"
+  "      <select data-chg=\"swset(${80+p},this.value)\" onchange=\"stage(this);this.blur()\">${opts(['Toggle on each touch','ON only while touched'],d.touchAct[p])}</select></div>`).join(''):'<p class=\"note\">Pad mapping needs switch firmware 2.9 or newer.</p>'}</div>`:''}\n"
   "  </div><div data-tab=\"device\">\n"
   "  <div class=\"card\">\n"
   "    <label style=\"margin-top:0\">Name</label>\n"
@@ -1819,6 +1867,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  </div></div>`;\n"
   "  applySub('sw');\n"
   "}\n"
+  "function swset(idx,v){return cmd(swMac,15,{idx:idx,f:+v})}   // switch setting: idx = field*16 + relay/pad\n"
   "async function relUse(el,i){const u=!el.classList.contains('on');el.classList.toggle('on',u);if(!await post('/api/relayuse',{mac:swMac,idx:i,used:u}))el.classList.toggle('on',!u)}\n"
   "async function swRename(){const n=$('#swName').value.trim();if(!n)return;if(await cmd(swMac,4,{text:n}))toast('Name saved')}\n"
   "\n"
@@ -1933,13 +1982,15 @@ static const char INDEX_HTML[] PROGMEM =
   "async function clearConsole(){if(await post('/api/clearconsole'))$('#log').textContent=''}\n"
   "\n"
   "/* Hub -> Home settings: GLOBAL settings that apply to every device (each device keeps the last values it got) */\n"
-  "let homeKey='';\n"
+  "let homeKey='',homeEdit=false;   // home settings stay locked (greyed) until you tap Edit\n"
+  "function homeEditSet(on){homeEdit=on;homeKey='';renderHomeSet()}\n"
   "function renderHomeSet(){const box=$('#homeset'),g=(S.hub||{}).global;if(!box||!g)return;\n"
-  "  const key=JSON.stringify(g);if(key===homeKey||typing('#homeset')){homeLive();return}homeKey=key;\n"
+  "  const key=JSON.stringify(g)+homeEdit;if(key===homeKey||typing('#homeset')||(homeEdit&&homeKey)){homeLive();return}homeKey=key;\n"
   "  const tk=S.devices.find(d=>d.type==='tank'),tc=tk&&tk.tank&&tk.tank.cfg,mute=g.quietFrom!==g.quietTo;\n"
   "  box.innerHTML=`<style>#homeset .hs{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:0 0 12px}#homeset .hs h4{margin:0 0 6px;display:flex;justify-content:space-between;align-items:center;font-size:13px}\n"
   "    #homeset .lab{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin:8px 0 2px}#homeset .meter{position:relative;height:14px;border-radius:7px;background:linear-gradient(90deg,#111,#665d2e 60%,#fff3b0);margin:10px 0 4px}\n"
   "    #homeset .meter i{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--acc);border-radius:2px}#homeset .meter b{position:absolute;top:2px;width:10px;height:10px;margin-left:-5px;border-radius:50%;background:#fff;box-shadow:0 0 0 2px #000}</style>\n"
+  "  <fieldset id=\"hsF\" ${homeEdit?'':'disabled'}>\n"
   "  <div class=\"hs\"><h4>☀ Day <span class=\"row\" style=\"margin:0;flex:0 0 auto;gap:4px\"><select id=\"gDf\">${hrs(g.dayFrom)}</select>→<select id=\"gDt\">${hrs(g.dayTo)}</select></span></h4>\n"
   "    <div class=\"lab\"><span>Status light</span></div>${sl('gLd',0,255,g.ledDay,'b255','',130)}\n"
   "    </div>\n"
@@ -1952,7 +2003,10 @@ static const char INDEX_HTML[] PROGMEM =
   "  <div class=\"hs\"><h4>◐ Room light <span class=\"meta\" id=\"rlNow\"></span></h4>\n"
   "    <div class=\"meter\" id=\"rlMeter\"></div>\n"
   "    <div class=\"lab\"><span>Dark below</span></div>${sl('gDark',0,100,Math.round(Math.sqrt(g.litOff/4095)*100),'dark','',80)}</div>\n"
-  "  <div class=\"row\"><button class=\"btn p\" onclick=\"saveHomeSet()\">Save</button><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"homeDefaults()\">Reset to defaults</button></div><div class=\"note\" id=\"homemsg\"></div>`;\n"
+  "  </fieldset>\n"
+  "  ${homeEdit?`<div class=\"row\"><button class=\"btn p\" onclick=\"saveHomeSet()\">Save</button><button class=\"btn\" onclick=\"homeEditSet(false)\">Cancel</button></div>\n"
+  "    <div class=\"row\"><button class=\"btn\" onclick=\"homeDefaults()\">Reset to defaults</button></div>`\n"
+  "    :`<div class=\"row\"><button class=\"btn\" onclick=\"homeEditSet(true)\">✎ Edit home settings</button></div>`}<div class=\"note\" id=\"homemsg\"></div>`;\n"
   "  homeLive()}\n"
   "/* room light slider is on a square-root scale so the low readings (where rooms really are) get most of the travel */\n"
   "const sq2ldr=v=>Math.max(5,Math.min(4000,Math.round((v/100)**2*4095))),ldr2sq=x=>Math.sqrt(Math.max(0,x)/4095)*100;\n"
@@ -1969,10 +2023,10 @@ static const char INDEX_HTML[] PROGMEM =
   "    litOff:dk,litOn:Math.min(4095,dk+Math.max(10,Math.round(dk*0.3))),ledStyle:+$('#gLs').value,ledPeriod:+$('#gLp').value,okColor:parseInt($('#gOk').value.slice(1),16)},m=$('#homemsg');\n"
   "  if(mute&&b.quietFrom===b.quietTo){m.textContent='Night start and end must differ.';return}\n"
   "  const ok=await post('/api/global',b);\n"
-  "  m.textContent=ok?'Saved ✓':'Could not save.'}\n"
+  "  if(ok){homeEdit=false;homeKey='';renderHomeSet();toast('Home settings saved')}else m.textContent='Could not save.'}\n"
   "async function homeDefaults(){if(!confirm('Reset home settings to defaults?'))return;\n"
   "  const ok=await post('/api/global',{quietFrom:22,quietTo:7,dayFrom:7,dayTo:19,ledDay:5,ledNight:2,litOn:120,litOff:80,ledStyle:0,ledPeriod:5000,okColor:0x00ff00});\n"
-  "  homeKey='';toast(ok?'Defaults restored':'Could not save')}\n"
+  "  homeEdit=false;homeKey='';renderHomeSet();toast(ok?'Defaults restored':'Could not save')}\n"
   "/* read-only line for a device page: a global value, with where to change it */\n"
   "function globalNote(txt){return `<p class=\"note\">${txt} · <a href=\"#\" onclick=\"nav('hub');return false\" style=\"color:var(--acc)\">Home settings</a></p>`}\n"
   "</script>\n"
@@ -2215,6 +2269,15 @@ void webBegin() {
     if (cmd == C_RELAY) activity(dn + ": " + rn + (val ? " ON" : " OFF") + " (from " + who(r) + ")", false);
     if (cmd == C_ALL)   activity(dn + ": all " + (val ? "ON" : "OFF") + " (from " + who(r) + ")", false);
     if (cmd == C_TOUCH) activity(dn + ": touch buttons " + (val ? "enabled" : "disabled") + " (from " + who(r) + ")", false);
+    if (cmd == C_SW_SET) {
+      int n = idx & 15, fld = idx >> 4, v = (int)f; String what;
+      if (fld == 1) what = "Relay " + String(n + 1) + " output: " + (v == 1 ? "pulse" : "stays on");
+      else if (fld == 2) what = "Relay " + String(n + 1) + " pulse length " + String(v) + " ms";
+      else if (fld == 3) what = "Relay " + String(n + 1) + " ON drives the pin " + (v ? "HIGH" : "LOW");
+      else if (fld == 4) what = "Touch pad " + String(n + 1) + (v >= 0 && v < 4 ? " controls relay " + String(v + 1) : String(" does nothing"));
+      else if (fld == 5) what = "Touch pad " + String(n + 1) + (v == 1 ? ": ON only while touched" : ": toggles");
+      if (what.length()) activity(dn + ": " + what + " (from " + who(r) + ")", false);
+    }
     if (cmd == C_SILENCE) activity(dn + ": alarm silenced (from " + who(r) + ")", false);
     if (cmd == C_TANK_SET) {
       static const char* names[] = { "", "full distance", "empty distance", "full alarm level", "low alarm level", "buzzer", "quiet hours from", "quiet hours until", "LED colours", "level LEDs", "daytime display from", "daytime display until", "daytime minimum brightness" };
