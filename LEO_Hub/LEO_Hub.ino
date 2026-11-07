@@ -38,13 +38,14 @@
 #include <AsyncJson.h>
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>
+#include <Adafruit_NeoPixel.h>
 #include <mbedtls/md.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.1.3"
+#define HUB_FW            "1.2.1"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -70,14 +71,14 @@
 enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5,
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
-enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8 };
+enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9 };
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
 struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; };   // hub local time, minutes after midnight (-1 unknown)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
-struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; };
+struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; };
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
@@ -118,6 +119,7 @@ struct Dev {
   float    watts[4];
   uint8_t  gpio[4];
   bool     infoKnown;
+  uint8_t  touch;                         // 0 off, 1 on, 255 = switch firmware without touch support
   // tank
   float    levelPct, distCm;
   uint8_t  leds, tstate, sensorOk;
@@ -145,6 +147,8 @@ AsyncWebSocket consoleWs("/console");
 
 volatile bool netUpPending = false, netDownPending = false;
 bool     staUp = false, apUp = false;
+// onboard RGB LED: GPIO48 on most ESP32-S3 DevKitC boards, GPIO38 on DevKitC v1.1 - drive both (nothing else uses them)
+Adafruit_NeoPixel ledA(1, 48, NEO_GRB + NEO_KHZ800), ledB(1, 38, NEO_GRB + NEO_KHZ800);
 uint32_t staDownSince = 0, lastStaTry = 0, lastPush = 0, restartAt = 0;
 bool     stateDirty = true;
 uint8_t  txSeq = 0;
@@ -524,9 +528,10 @@ void handlePacket(const RxItem& it) {
     if (needInfo) queueCmd(mac, C_INFO, 0, 0, 0, "");
     if (note.length()) activity(note, false);
     if (changed) stateDirty = true;
-  } else if (h->type == M_SW_INFO && blen >= sizeof(MsgSwInfo)) {
-    MsgSwInfo m; memcpy(&m, it.data, sizeof(m));
+  } else if (h->type == M_SW_INFO && blen >= sizeof(MsgSwInfo) - 1) {       // older switches omit 'touch'
+    MsgSwInfo m = {}; memcpy(&m, it.data, min(blen, sizeof(m)));
     DevGuard g; Dev& d = devs[i];
+    d.touch = blen >= sizeof(MsgSwInfo) ? (m.touch ? 1 : 0) : 255;
     d.n = m.n > 4 ? 4 : m.n; copyStr(d.fw, sizeof(d.fw), m.fw);
     for (int r = 0; r < 4; ++r) { copyStr(d.rname[r], sizeof(d.rname[r]), m.rname[r]); d.watts[r] = m.watts[r]; d.gpio[r] = m.gpio[r]; }
     d.infoKnown = true; stateDirty = true;
@@ -604,6 +609,7 @@ String stateJson() {
       o["online"] = online; o["rssi"] = v.rssi; o["uptime"] = v.uptime; o["secure"] = v.hasKey;
       o["seenAgo"] = v.lastSeen ? (now - v.lastSeen) : 0;
       if (v.type == DEV_SWITCH && v.infoKnown) {
+        if (v.touch != 255) o["touch"] = (bool)v.touch;
         JsonArray rl = o["relays"].to<JsonArray>();
         for (int r = 0; r < v.n; ++r) {
           JsonObject x = rl.add<JsonObject>();
@@ -862,7 +868,7 @@ static const char INDEX_HTML[] PROGMEM =
   "\n"
   "/* devices page: rebuilt only when the device set changes, so typing isn't clobbered */\n"
   "function renderDevices(){\n"
-  "  const keys=S.devices.map(d=>d.mac+(d.relays?d.relays.length:0)+d.type).join(',');\n"
+  "  const keys=S.devices.map(d=>d.mac+(d.relays?d.relays.length:0)+d.type+d.touch).join(',');\n"
   "  if(keys!==devKeys){devKeys=keys;\n"
   "    $('#devlist').innerHTML=S.devices.length?S.devices.map(d=>`<div class=\"card\" style=\"margin-bottom:12px\" id=\"dv-${d.mac.replace(/:/g,'')}\">\n"
   "      <div class=\"chead\"><span class=\"dot\" data-k=\"dot\"></span><span class=\"nm\">${esc(d.name)}</span><span class=\"pill\">${esc(d.type)}</span></div>\n"
@@ -871,6 +877,7 @@ static const char INDEX_HTML[] PROGMEM =
   "      ${d.type==='switch'?(d.relays||[]).map((r,i)=>`<label>Relay ${i+1} (GPIO ${r.gpio}) — name / watts</label>\n"
   "        <div class=\"row\" style=\"margin:0\"><input value=\"${esc(r.name)}\" data-r=\"${i}n\"><input type=\"number\" value=\"${r.watts}\" style=\"flex:0 0 90px\" data-r=\"${i}w\">\n"
   "        <button class=\"btn\" style=\"flex:0 0 70px\" onclick=\"relMeta('${d.mac}',${i},this)\">Save</button></div>`).join(''):''}\n"
+  "      ${d.type==='switch'&&d.touch!==undefined?`<label>Touch buttons on the switch (GPIO 4–7)</label><div class=\"row\" style=\"margin:0\"><button class=\"btn ${d.touch?'p':''}\" onclick=\"cmd('${d.mac}',9,{val:${d.touch?0:1}})\">${d.touch?'Enabled — tap to disable':'Disabled — tap to enable'}</button></div>`:''}\n"
   "      <div class=\"row\"><button class=\"btn\" onclick=\"cmd('${d.mac}',3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart this device?'))cmd('${d.mac}',6)\">Restart</button><button class=\"btn d\" onclick=\"forget('${d.mac}')\">Forget</button></div>\n"
   "      <label>Update this device's firmware — choose its .bin</label><input type=\"file\" accept=\".bin\" data-k=\"bin\">\n"
   "      <div class=\"row\"><button class=\"btn p\" onclick=\"edgeOta('${d.mac}',this)\">Upload &amp; install</button></div>\n"
@@ -1044,6 +1051,7 @@ void webBegin() {
     }
     if (cmd == C_RELAY) activity(dn + ": " + rn + (val ? " ON" : " OFF") + " (from " + who(r) + ")", false);
     if (cmd == C_ALL)   activity(dn + ": all " + (val ? "ON" : "OFF") + " (from " + who(r) + ")", false);
+    if (cmd == C_TOUCH) activity(dn + ": touch buttons " + (val ? "enabled" : "disabled") + " (from " + who(r) + ")", false);
     queueCmd(mac, cmd, idx, val, f, text.c_str());
     jsonOk(r);
   }));
@@ -1201,6 +1209,7 @@ void setup() {
   dbg("LEO Hub " HUB_FW " " + hubId);
 
   WiFi.persistent(false);
+  ledA.begin(); ledB.begin(); ledA.clear(); ledA.show(); ledB.clear(); ledB.show();
   WiFi.onEvent(wifiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname("LEO-Hub");
@@ -1217,8 +1226,30 @@ void setup() {
   esp_task_wdt_add(NULL);
 }
 
+/* Status LED: one very short, barely visible blink; dark the rest of the time.
+     green  every 5 s : on WiFi, all good
+     cyan   every 2 s : pairing window open ("Allow new devices")
+     amber  every 2 s : WiFi lost / still connecting
+     blue   every 2 s : emergency hotspot is on
+   Brightness: 2/255 by day, 1/255 at night (the lowest the LED can show). */
+void hubLedTick() {
+  static uint32_t last = 0, shown = 0xFFFFFFFF; if (millis() - last < 20) return; last = millis();
+  uint8_t r, g, b; uint32_t period;
+  if (apUp)                          { r = 0; g = 0; b = 1; period = 2000; }
+  else if (!staUp)                   { r = 1; g = 1; b = 0; period = 2000; }
+  else if (millis() < pairingUntil)  { r = 0; g = 1; b = 1; period = 2000; }
+  else                               { r = 0; g = 1; b = 0; period = 5000; }
+  bool day = false;
+  if (timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); day = tm.tm_hour >= 7 && tm.tm_hour < 18; }
+  uint8_t k = day ? 2 : 1;
+  bool on = (millis() % period) < 60;                       // 60 ms flash
+  uint32_t c = on ? ledA.Color(r * k, g * k, b * k) : 0;
+  if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
+}
+
 void loop() {
   esp_task_wdt_reset();
+  hubLedTick();
   serialTick();
   ws.cleanupClients(); consoleWs.cleanupClients();
   wifiTick();

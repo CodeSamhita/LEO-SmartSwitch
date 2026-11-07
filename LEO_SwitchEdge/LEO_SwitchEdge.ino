@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.1.1-sw"
+#define EDGE_FW           "2.2.1-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -65,14 +65,14 @@ static const int TOUCH_GPIO[RELAY_COUNT] = { 4, 5, 6, 7 };
 enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5,
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
-enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8 };
+enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9 };
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
 struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; };   // hub local time, minutes after midnight (-1 unknown)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
-struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; };
+struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; };
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
@@ -158,6 +158,7 @@ void relaySet(int i, bool on) {
 }
 
 /* ---------------------------- touch buttons ------------------------- */
+bool touchEnabled = false;                             // off until turned on in the app (config.json "touch")
 bool touchStable[RELAY_COUNT], touchRaw[RELAY_COUNT]; uint32_t touchChangedAt[RELAY_COUNT];
 bool touchRead(int i) { return (digitalRead(TOUCH_GPIO[i]) == HIGH) == (TOUCH_ACTIVE_HIGH == 1); }
 void touchInit() {
@@ -173,8 +174,8 @@ void touchTick() {
     bool r = touchRead(i);
     if (r != touchRaw[i]) { touchRaw[i] = r; touchChangedAt[i] = millis(); continue; }
     if (r != touchStable[i] && millis() - touchChangedAt[i] >= TOUCH_DEBOUNCE_MS) {
-      touchStable[i] = r;
-      if (r) { dbg("Touch " + String(i + 1)); relaySet(i, !relays[i].on); }   // toggle on touch, not on release
+      touchStable[i] = r;                            // tracked even when disabled, so enabling never toggles
+      if (r && touchEnabled) { dbg("Touch " + String(i + 1)); relaySet(i, !relays[i].on); }   // toggle on touch, not on release
     }
   }
 }
@@ -185,6 +186,7 @@ void configLoad() {
   File f = LittleFS.open(CFG_FILE, "r"); if (!f) return;
   JsonDocument d; if (deserializeJson(d, f)) { f.close(); return; } f.close();
   devName = d["deviceName"] | devName.c_str();
+  touchEnabled = d["touch"] | false;
   int i = 0;
   for (JsonObject o : d["relays"].as<JsonArray>()) {
     if (i >= RELAY_COUNT) break;
@@ -200,6 +202,7 @@ void configSave() {             // rewrite only the keys this edge owns; everyth
   JsonDocument d;
   File f = LittleFS.open(CFG_FILE, "r"); if (f) { deserializeJson(d, f); f.close(); }
   d["deviceName"] = devName;
+  d["touch"] = touchEnabled;
   JsonArray a = d["relays"].to<JsonArray>();
   for (int i = 0; i < RELAY_COUNT; ++i) { JsonObject o = a.add<JsonObject>(); o["name"] = relays[i].name; o["gpio"] = relays[i].gpio; o["watts"] = relays[i].watts; }
   f = LittleFS.open(CFG_FILE, "w"); if (f) { serializeJson(d, f); f.close(); }
@@ -238,6 +241,7 @@ void sendInfo() {
   MsgSwInfo m = {}; fillHdr(m.h, M_SW_INFO);
   copyStr(m.name, sizeof(m.name), devName.c_str()); copyStr(m.fw, sizeof(m.fw), EDGE_FW); m.n = RELAY_COUNT;
   for (int i = 0; i < RELAY_COUNT; ++i) { copyStr(m.rname[i], sizeof(m.rname[i]), relays[i].name.c_str()); m.watts[i] = relays[i].watts; m.gpio[i] = (uint8_t)relays[i].gpio; }
+  m.touch = touchEnabled ? 1 : 0;
   sendHub(&m, sizeof(m));
 }
 void sendState() {
@@ -281,6 +285,8 @@ void handleCmd(const MsgCmd& c) {
     case C_REBOOT:  restartAt = millis() + 300; break;
     case C_INFO:    sendInfo(); stateDirty = true; break;
     case C_UNPAIR:  forgetHub("hub asked us to forget it"); break;
+    case C_TOUCH:   touchEnabled = c.val != 0; configSave(); sendInfo();
+                    dbg(String("Touch buttons ") + (touchEnabled ? "enabled" : "disabled")); break;
   }
 }
 
@@ -363,13 +369,12 @@ void linkTick() {
   if (hubKnown && k < 2) { addPeer(hubMac); sendHello(hubMac); }
   else { addPeer(BCAST); sendHello(BCAST); }
 }
-/* Power / status LED: one slow breath, then a pause (faint glow by day, dark at night).
-   Colour = status, peak brightness = time of day (from the hub) x status.
-     green  : on and linked to the hub          (calm: long dark pause)
-     amber  : on, looking for the hub           (shorter pause)
-     blue   : on, never paired with a hub       (shorter pause)
-     cyan   : receiving a firmware update       (continuous slow breath)
-     white  : quick blinks for "identify"                                  */
+/* Power / status LED: a 60 ms blink at the lowest brightness the LED can show.
+     green  every 5 s   : on and linked to the hub
+     amber  every 2 s   : on, looking for the hub
+     blue   every 2 s   : on, never paired with a hub
+     cyan   every 0.5 s : receiving a firmware update
+     white  quick blinks: "identify" from the app (deliberately visible)    */
 float daylight() {                                   // 0 = night, 1 = full day; unknown time -> night (dim)
   if (hubMins < 0 || millis() - hubMinsAt > 24UL * 3600 * 1000) return 0;
   int m = (hubMins + (int)((millis() - hubMinsAt) / 60000)) % 1440;
@@ -386,22 +391,15 @@ void ledTick() {
   if (millis() < identifyUntil) {
     c = ((millis() / 150) % 2) ? pix.Color(90, 90, 90) : 0;
   } else {
-    uint8_t r, g, b; float boost; uint32_t gap;
-    if (otaActive)      { r = 0;   g = 180; b = 255; boost = 1.0f; gap = 0;    }
-    else if (linked)    { r = 0;   g = 255; b = 40;  boost = 1.0f; gap = 6000; }
-    else if (hasKey)    { r = 255; g = 110; b = 0;   boost = 1.4f; gap = 2500; }
-    else                { r = 0;   g = 60;  b = 255; boost = 1.4f; gap = 2500; }
-    const uint32_t breath = 2600;                    // in + out
-    uint32_t t = millis() % (breath + gap);
-    float lvl = 0;
-    if (t < breath) { float x = (1 - cosf(2 * PI * t / breath)) / 2; lvl = x * x; }   // smooth, eye-friendly curve
-    // daytime: rests at a faint glow and breathes up to the day maximum;
-    // night: completely dark between breaths. Dawn/dusk blend the two.
-    float day  = daylight();
-    float peak = (2.5f + day * 15.5f) * boost / 255.0f;          // night ~2.5/255, day ~18/255 (x status boost)
-    float base = day * 3.0f / 255.0f;                             // day minimum ~3/255, night 0
-    float k = base + lvl * (peak - base);
-    c = pix.Color((uint8_t)(r * k + 0.5f), (uint8_t)(g * k + 0.5f), (uint8_t)(b * k + 0.5f));
+    // one very short, barely visible blink; dark the rest of the time
+    uint8_t r, g, b; uint32_t period;
+    if (otaActive)      { r = 0; g = 1; b = 1; period = 500;  }
+    else if (linked)    { r = 0; g = 1; b = 0; period = 5000; }
+    else if (hasKey)    { r = 1; g = 1; b = 0; period = 2000; }
+    else                { r = 0; g = 0; b = 1; period = 2000; }
+    uint8_t k = daylight() > 0.5f ? 2 : 1;           // 2/255 by day, 1/255 at night: the LED's lowest steps
+    bool on = (millis() % period) < 60;              // 60 ms flash
+    c = on ? pix.Color(r * k, g * k, b * k) : 0;
   }
   if (c != shown) { shown = c; pix.setPixelColor(0, c); pix.show(); }   // only talk to the LED when it changes
 }

@@ -39,12 +39,21 @@ Libraries: ESPAsyncWebServer + AsyncTCP (ESP32Async), ArduinoJson 7, Adafruit Ne
   The hub logs the change when it hears the switch again. Unwired pins are pulled down and
   never trigger. For modules that pull LOW when touched, set `TOUCH_ACTIVE_HIGH 0`.
   Night lock only blocks the app, not a person at the switch.
-- **Status LED** (replaces the power LED): one slow breath, then a pause. By day the pause
-  keeps a faint glow (about 3/255) so the switch visibly has power. At night the pause is completely dark.
-  Green with a long pause means linked; amber with a shorter pause means looking for the hub;
-  blue means never paired; cyan means a firmware update is in progress; quick white blinks mean identify.
-  Brightness follows the time of day sent by the hub, from about 18/255 at midday down to
-  about 2/255 at night, with dawn and dusk ramps. If the time is unknown it stays at the night level.
+- **Status LED** (replaces the power LED): one 60 ms blink at the LED's lowest brightness
+  (2/255 by day, 1/255 at night, using the time from the hub), dark the rest of the time.
+  - Green every 5 s: linked.
+  - Amber every 2 s: looking for the hub.
+  - Blue every 2 s: never paired.
+  - Cyan, fast: firmware update in progress.
+  - Quick white blinks: identify.
+- **Touch buttons** are off by default; turn them on in *Devices → Touch buttons* once the pads are wired.
+
+## Hub status LED (1.2.1)
+The onboard RGB LED (GPIO 48, or 38 on DevKitC v1.1) gives the same faint 60 ms blink:
+- Green every 5 s: on WiFi.
+- Cyan every 2 s: pairing open.
+- Amber every 2 s: WiFi lost or connecting.
+- Blue every 2 s: emergency hotspot on.
 
 ## Updating firmware (no cable)
 - **Hub:** Arduino *Export Compiled Binary* → web app **Hub → Update hub firmware** → `LEO_Hub.ino.bin`.
