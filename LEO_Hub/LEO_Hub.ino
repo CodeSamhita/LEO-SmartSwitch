@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.9.1"
+#define HUB_FW            "1.9.2"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -72,7 +72,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB), value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -81,7 +81,7 @@ struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t roo
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
-struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
+struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; uint8_t highlight; uint8_t gain[8]; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
 struct __attribute__((packed)) MsgTankRules { LeoHdr h; uint8_t count; uint8_t r[6][6]; };   // alarm rules: on, level %, dir (0 rises to, 1 drops to), pattern, repeats, colour
 struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
@@ -134,6 +134,7 @@ struct Dev {
   float    tFullCm, tEmptyCm;
   uint8_t  tFullPct, tLowPct, tBuzzer, tQuietFrom, tQuietTo, tPalette, tLedCount, tShowFrom, tShowTo, tMinBright;
   uint8_t  tColors[24]; bool tColorsKnown;  // custom level colours (tank 1.6+)
+  uint8_t  tHighlight, tGain[8]; bool tGainKnown;   // current-level highlight %, colour-matching brightness per LED (tank 1.7.3+)
   uint8_t  tRules[36]; bool tRulesKnown;    // alarm rules (tank 1.7+): 6 x {on, level, dir, pattern, repeats, color}
   uint8_t  hideMask;                      // switch relays marked "not in use" (hidden, skipped by All on) - saved in devices.json
   bool     diagKnown;                     // chip details from M_DIAG (Advanced view)
@@ -353,7 +354,7 @@ void histTick() {                       // once a second from loop(): advance sl
     uint32_t gap = slot > h.lastSlot ? slot - h.lastSlot : HIST_SLOTS;        // clock jumped back -> start over
     for (uint32_t s = 1; s < gap && s <= HIST_SLOTS; ++s) h.v[(h.lastSlot + s) % HIST_SLOTS] = 0xFFFF;
     h.lastSlot = slot; h.accSum = 0; h.accN = 0; h.v[slot % HIST_SLOTS] = 0xFFFF;
-    if (slot % 6 == 0) save = true;                                           // write to flash every 30 min
+    if (slot % 2 == 0) save = true;                                           // write to flash every 10 min
   }
   struct { uint8_t mac[6]; uint16_t v; } now[MAX_DEV]; int n = 0;
   { DevGuard g;
@@ -669,13 +670,15 @@ void handlePacket(const RxItem& it) {
     d.levelPct = m.levelPct; d.distCm = m.distCm; d.leds = m.leds; d.tstate = m.state;
     d.sensorOk = m.sensorOk; d.uptime = m.uptime; copyStr(d.stateTxt, sizeof(d.stateTxt), m.stateTxt);
   } else if (h->type == M_TANK_INFO && blen >= offsetof(MsgTankInfo, palette)) {   // older tanks send fewer fields
-    MsgTankInfo m = {}; m.ledCount = 7; m.showFrom = 7; m.showTo = 22; m.minBright = 6;
+    MsgTankInfo m = {}; m.ledCount = 7; m.showFrom = 7; m.showTo = 22; m.minBright = 6; m.highlight = 10;
+    for (int k = 0; k < 8; ++k) m.gain[k] = 100;
     memcpy(&m, it.data, min(blen, sizeof(m)));
     DevGuard g; Dev& d = devs[i];
     d.tFullCm = m.fullCm; d.tEmptyCm = m.emptyCm; d.tFullPct = m.fullPct; d.tLowPct = m.lowPct;
     d.tBuzzer = m.buzzer; d.tQuietFrom = m.quietFrom; d.tQuietTo = m.quietTo; d.tPalette = m.palette; d.tLedCount = m.ledCount;
     d.tShowFrom = m.showFrom; d.tShowTo = m.showTo; d.tMinBright = m.minBright;
-    d.tColorsKnown = blen >= sizeof(MsgTankInfo); memcpy(d.tColors, m.colors, sizeof(d.tColors));
+    d.tColorsKnown = blen >= offsetof(MsgTankInfo, highlight); memcpy(d.tColors, m.colors, sizeof(d.tColors));
+    d.tGainKnown = blen >= sizeof(MsgTankInfo); d.tHighlight = m.highlight; memcpy(d.tGain, m.gain, sizeof(d.tGain));
     d.tcfgKnown = true; stateDirty = true;
   } else if (h->type == M_TANK_RULES && blen >= sizeof(MsgTankRules)) {
     MsgTankRules m; memcpy(&m, it.data, sizeof(m));
@@ -806,6 +809,7 @@ String stateJson() {
           c["buzzer"] = (bool)v.tBuzzer; c["quietFrom"] = v.tQuietFrom; c["quietTo"] = v.tQuietTo;
           c["palette"] = v.tPalette; c["ledCount"] = v.tLedCount;
           c["showFrom"] = v.tShowFrom; c["showTo"] = v.tShowTo; c["minBright"] = v.tMinBright;
+          if (v.tGainKnown) { c["highlight"] = v.tHighlight; JsonArray ga = c["gain"].to<JsonArray>(); for (int k = 0; k < 8; ++k) ga.add(v.tGain[k]); }
           if (v.tRulesKnown) { JsonArray ra = c["rules"].to<JsonArray>();
             for (int k = 0; k < 6; ++k) { JsonArray x = ra.add<JsonArray>(); for (int b = 0; b < 6; ++b) x.add(v.tRules[k * 6 + b]); } }
           if (v.tColorsKnown) { JsonArray ca = c["colors"].to<JsonArray>();
@@ -1189,10 +1193,17 @@ static const char INDEX_HTML[] PROGMEM =
   "connect();\n"
   "setInterval(()=>{if(page==='home')renderHome()},5000);\n"
   "/* tank detail page: live view + actions + settings (settings are stored on the tank itself) */\n"
+  "/* settings areas are not redrawn while you are TYPING in them (text/number fields, drop-downs, colour pickers);\n"
+  "   buttons and toggles never block a redraw - after any tap the focus is released so live values always come through */\n"
+  "function typing(sel){const a=document.activeElement,box=$(sel);if(!a||!box||!box.contains(a))return false;\n"
+  "  return a.tagName==='SELECT'||a.tagName==='TEXTAREA'||(a.tagName==='INPUT'&&!['button','checkbox','radio','submit'].includes(a.type))}\n"
+  "document.addEventListener('click',e=>{const b=e.target.closest('button');if(b)setTimeout(()=>b.blur(),0)},true);\n"
   "/* q(text): a circled ? that shows/hides an explanation right below it */\n"
   "function q(t){return `<span class=\"hlp\" onclick=\"event.stopPropagation();this.nextElementSibling.classList.toggle('show')\">?</span><span class=\"hlpt\">${t}</span>`}\n"
   "let tankMac='',tsetKey='';\n"
   "function openTank(m){tankMac=m;nav('tank')}\n"
+  "/* while a device is being updated it does not answer setting changes - say so instead of looking stuck */\n"
+  "function otaNote(mac){const o=S.ota||{};return o.active&&o.mac===mac?`<div class=\"banner info\"><b>Updating firmware… ${o.pct||0}% — settings and controls work again when it has restarted.</b></div>`:''}\n"
   "function tankDev(){return S.devices.find(x=>x.mac===tankMac)}\n"
   "function tset(idx,v){return cmd(tankMac,10,{idx:idx,f:+v})}\n"
   "function hrs(v){return [...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}\n"
@@ -1200,12 +1211,15 @@ static const char INDEX_HTML[] PROGMEM =
   "function ledCol(c,i,n){if(c&&c.palette==2&&c.colors&&c.colors[i])return c.colors[i];const t=n>1?i/(n-1):1,r=Math.round(255*(1-t)),v=Math.round(255*t);\n"
   "  return c&&c.palette==1?`rgb(${r},${v},0)`:`rgb(${r},0,${v})`}\n"
   "function tankBar(d,h){const t=d.tank||{},c=t.cfg,n=c?(c.ledCount||7):9,ok=t.sensorOk!==false,lit=ok?Math.round((t.level||0)*n/100):0;\n"
-  "  return `<div class=\"tankbar\" style=\"${h?'height:'+h+'px':''}\">${[...Array(n)].map((_,i)=>`<div class=\"seg\" style=\"${!ok?'background:#d9a400;opacity:.85':i<lit?'background:'+ledCol(c,i,n)+(i===lit-1?';filter:brightness(1.25);box-shadow:0 0 6px '+ledCol(c,i,n):';filter:brightness(.9)'):''}\"></div>`).join('')}</div>`}\n"
+  "  return `<div class=\"tankbar\" style=\"${h?'height:'+h+'px':''}\">${[...Array(n)].map((_,i)=>`<div class=\"seg\" style=\"${!ok?'background:#d9a400;opacity:.85':i<lit?'background:'+ledCol(c,i,n)+segLook(c,i,lit):''}\"></div>`).join('')}</div>`}\n"
+  "/* app bar mirrors the strip: colour-matching brightness per LED, current level highlighted (shown a bit stronger so it reads on a phone) */\n"
+  "function segLook(c,i,lit){const g=c&&c.gain?c.gain[i]/100:1,hl=c&&c.highlight!=null?c.highlight:10;\n"
+  "  return i===lit-1?`;filter:brightness(${(g*(1+hl/50)).toFixed(2)});box-shadow:0 0 ${hl?6:0}px ${ledCol(c,i,lit)}`:`;filter:brightness(${(g*(1-hl/200)).toFixed(2)})`}\n"
   "const SNDS=['Chirp','Short beeps','Long beeps','Triple beep','Siren','LEDs only'],FLCOL=['No flash','Green','Red','Blue','White','Amber'];\n"
   "function opts(list,v){return list.map((x,i)=>`<option value=\"${i}\" ${i==v?'selected':''}>${x}</option>`).join('')}\n"
   "function renderTank(){  const d=tankDev();if(!d){nav('home');return}\n"
   "  const t=d.tank||{},c=t.cfg,ok=t.sensorOk!==false,on=d.online;\n"
-  "  $('#tlive').innerHTML=`<div class=\"card ${on?'':'offline'}\">\n"
+  "  $('#tlive').innerHTML=otaNote(d.mac)+`<div class=\"card ${on?'':'offline'}\">\n"
   "    <div class=\"chead\"><span class=\"dot ${on?'on':'off'}\"></span><span class=\"nm\">${esc(d.name)}</span></div>\n"
   "    <div class=\"tank\">${tankBar(d,190)}<div style=\"flex:1;min-width:0\">\n"
   "      <div class=\"big\">${ok?Math.round(t.level||0):'—'}<small>%</small></div>\n"
@@ -1219,7 +1233,7 @@ static const char INDEX_HTML[] PROGMEM =
   "      <button class=\"btn\" ${on?'':'disabled'} onclick=\"cmd(tankMac,3)\">Identify</button></div></div>`;\n"
   "  // settings form: rebuilt only when the tank reports new values and you are not typing in it\n"
   "  const key=JSON.stringify(c||{})+d.name;\n"
-  "  if(key===tsetKey||$('#tset').contains(document.activeElement))return;\n"
+  "  if(key===tsetKey||typing('#tset'))return;\n"
   "  tsetKey=key;\n"
   "  if(!c){$('#tset').innerHTML=`<div class=\"card\" style=\"margin-top:12px\"><div class=\"meta\">Waiting for the tank's settings… (tank firmware 1.4 or newer)</div></div>`;return}\n"
   "  const showOn=c.showFrom!==c.showTo;\n"
@@ -1257,6 +1271,8 @@ static const char INDEX_HTML[] PROGMEM =
   "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).reverse().join('')}\n"
   "      <div class=\"row\"><button class=\"btn\" onclick=\"presetColors()\">Preset: Red · greens · Blue</button><button class=\"btn p\" onclick=\"saveColors()\">Save colours</button></div>\n"
   "      <p class=\"note\">LED 1 is the bottom of the strip. Only LEDs that are lit for the current level show their colour.</p></div>`:''}\n"
+  "    ${c.gain?`<label>Current level highlight${q('How much the top lit LED (the current water level) stands out from the LEDs below it: 0 % = all equal, 50 % = very clear. Half of it makes the top LED brighter, half makes the others dimmer.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0;align-items:center\"><input type=\"range\" min=\"0\" max=\"50\" value=\"${c.highlight}\" oninput=\"this.nextElementSibling.textContent=this.value+' %'\" onchange=\"tset(21,this.value);this.blur()\"><span class=\"meta\" style=\"flex:0 0 44px;text-align:right\">${c.highlight} %</span></div>`:''}\n"
   "    <label>LEDs used to show the level${q('How many LEDs, counted from the bottom of the strip, show the water level (1 to 8). A full tank lights all of them. The top LED is always the small status light.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tLeds\" type=\"number\" min=\"1\" max=\"8\" value=\"${c.ledCount||7}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveLeds()\">Save</button></div>\n"
   "    <label style=\"margin-top:12px\">Daytime display${q('Normally the level LEDs follow the room light and go dark in a dark room. Between these times they always stay on, at least at the minimum brightness below, so you can see the level at a glance. Outside these times (night) they go dark in a dark room. Set both times the same to turn this off.')}</label>\n"
@@ -1265,6 +1281,15 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tMb\" type=\"number\" min=\"1\" max=\"60\" value=\"${c.minBright||6}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveShow()\">Save</button></div>\n"
   "    <p class=\"note\">${showOn?`Daytime display is on: ${String(c.showFrom).padStart(2,'0')}:00–${String(c.showTo).padStart(2,'0')}:00.`:'Daytime display is off.'}</p>\n"
   "  </div>\n"
+  "  ${c.gain?`<h3>Colour matching${q('Different colours look differently bright to the eye even at the same setting (green and yellow look brighter than blue or red). Press <b>Light all LEDs</b>, look at the tank, and lower the brightness of the LEDs that look too bright until all of them look even. Then press Save. This applies to every colour mode.')}</h3>\n"
+  "  <div class=\"card\">\n"
+  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn p\" onclick=\"tset(30,60).then(()=>toast('All level LEDs on for 60 s'))\">Light all LEDs for 60 s</button><button class=\"btn\" onclick=\"tset(30,0)\">Stop</button></div>\n"
+  "    ${[...Array(c.ledCount||7)].map((_,i)=>`<div class=\"switchrow\" style=\"margin:6px 0\"><span style=\"flex:0 0 96px\">LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
+  "      <span style=\"flex:0 0 22px;height:22px;border-radius:5px;background:${ledCol(c,i,c.ledCount||7)};filter:brightness(${c.gain[i]/100})\" data-sw=\"${i}\"></span>\n"
+  "      <input type=\"range\" min=\"10\" max=\"100\" value=\"${c.gain[i]}\" data-gain=\"${i}\" data-was=\"${c.gain[i]}\" oninput=\"matchPreview(this)\" onchange=\"this.blur()\" style=\"flex:1\">\n"
+  "      <span class=\"meta\" style=\"flex:0 0 40px;text-align:right\">${c.gain[i]} %</span></div>`).reverse().join('')}\n"
+  "    <div class=\"row\"><button class=\"btn\" onclick=\"resetMatching()\">All 100 %</button><button class=\"btn p\" onclick=\"saveMatching()\">Save matching</button></div>\n"
+  "  </div>`:''}\n"
   "  <h3>Device</h3>\n"
   "  <div class=\"card\">\n"
   "    <label>Name${q('The name shown in the app and in the Activity log.')}</label>\n"
@@ -1296,6 +1321,11 @@ static const char INDEX_HTML[] PROGMEM =
   "  const stops=[[212,167,44],[150,190,60],[85,150,45],[110,220,120]],mix=(a,b,f)=>a.map((x,k)=>Math.round(x+(b[k]-x)*f)),hex=c=>'#'+c.map(x=>x.toString(16).padStart(2,'0')).join('');\n"
   "  els.forEach((el,i)=>{let c;if(i===0)c=[229,57,53];else if(i===n-1&&n>1)c=[47,59,255];else{const f=n>3?(i-1)/(n-3):0,p=f*(stops.length-1),k=Math.min(Math.floor(p),stops.length-2);c=mix(stops[k],stops[k+1],p-k)}el.value=hex(c)});\n"
   "  toast('Preset filled in — press Save colours')}\n"
+  "function matchPreview(el){el.nextElementSibling.textContent=el.value+' %';const s=$(`[data-sw=\"${el.dataset.gain}\"]`);if(s)s.style.filter=`brightness(${el.value/100})`}\n"
+  "function resetMatching(){document.querySelectorAll('#tset input[data-gain]').forEach(el=>{el.value=100;matchPreview(el)});toast('Set to 100 % — press Save matching')}\n"
+  "async function saveMatching(){let n=0;for(const el of document.querySelectorAll('#tset input[data-gain]')){if(el.value===el.dataset.was)continue;\n"
+  "    if(!await tset(22+(+el.dataset.gain),el.value))return toast('Could not reach the hub');n++}\n"
+  "  toast(n?n+' LED'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
   "async function saveColors(){let n=0;for(const el of document.querySelectorAll('#tset input[data-led]')){if(el.value===el.dataset.was)continue;\n"
   "    if(!await tset(13+(+el.dataset.led),parseInt(el.value.slice(1),16)))return toast('Could not reach the hub');n++}\n"
   "  toast(n?n+' colour'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
@@ -1317,7 +1347,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function renderSw(){\n"
   "  const d=swDev();if(!d){nav('home');return}\n"
   "  const on=d.online,rl=d.relays||[];\n"
-  "  $('#swlive').innerHTML=`<div class=\"card ${on?'':'offline'}\">\n"
+  "  $('#swlive').innerHTML=otaNote(d.mac)+`<div class=\"card ${on?'':'offline'}\">\n"
   "    <div class=\"chead\"><span class=\"dot ${on?'on':'off'}\"></span><span class=\"nm\">${esc(d.name)}</span><span class=\"w\">${totalW(d).toFixed(0)} W</span></div>\n"
   "    ${rl.map((r,i)=>`<div class=\"rel\"><div class=\"n\"><b>${esc(r.name)}${r.used===false?' <span class=\"meta\">(not in use)</span>':''}</b><span class=\"meta\">${r.on?('On · '+r.watts+' W'+(r.onSecs?' · '+up(r.onSecs):'')):'Off'}</span></div>\n"
   "      <button class=\"tgl ${r.on?'on':''}\" ${on?'':'disabled'} onclick=\"tog(this,'${d.mac}',${i},${!r.on})\"></button></div>`).join('')||'<div class=\"meta\">Waiting for relay info…</div>'}\n"
@@ -1326,7 +1356,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"kv\"><span>Up</span><b>${up(d.uptime||0)}</b></div>\n"
   "    <div class=\"kv\"><span>Firmware</span><b>${esc(d.fw||'')}</b></div></div>`;\n"
   "  const key=JSON.stringify(rl.map(r=>[r.name,r.watts,r.used,r.gpio]))+d.touch+d.name;\n"
-  "  if(key===swKey||$('#swset').contains(document.activeElement))return;\n"
+  "  if(key===swKey||typing('#swset'))return;\n"
   "  swKey=key;\n"
   "  $('#swset').innerHTML=`\n"
   "  <h3>Relays${q('Each relay is one output of the switch. Give it the name of what it powers and its watts (used for the power total on Home).')}</h3>\n"
@@ -1638,6 +1668,8 @@ void webBegin() {
       static const char* names[] = { "", "full distance", "empty distance", "full alarm level", "low alarm level", "buzzer", "quiet hours from", "quiet hours until", "LED colours", "level LEDs", "daytime display from", "daytime display until", "daytime minimum brightness" };
       char hx[8]; snprintf(hx, sizeof(hx), "#%06lx", (unsigned long)f & 0xFFFFFFUL);
       if (idx >= 13 && idx <= 20) activity(dn + ": LED " + String(idx - 12) + " colour set to " + hx + " (from " + who(r) + ")", false);
+      if (idx == 21) activity(dn + ": current-level highlight set to " + String((int)f) + " % (from " + who(r) + ")", false);
+      if (idx >= 22 && idx <= 29) activity(dn + ": LED " + String(idx - 21) + " colour-matching brightness set to " + String((int)f) + " % (from " + who(r) + ")", false);
       String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx == 8 ? String(f >= 2 ? "custom" : f != 0 ? "red to green" : "red to blue") : idx == 9 || idx == 12 ? String((int)f) :
                  idx <= 2 ? String(f, 1) + " cm" : idx <= 4 ? String((int)f) + " %" : String((int)f) + ":00";
       if (idx >= 1 && idx <= 12) activity(dn + ": " + names[idx] + " set to " + v + " (from " + who(r) + ")", false);
@@ -1971,6 +2003,6 @@ void loop() {
   if (ws.count() && ((stateDirty && millis() - lastPush > 250) || millis() - lastPush > 2000)) {   // >= every 2 s: the page's "still live" signal
     stateDirty = false; lastPush = millis(); ws.textAll(stateJson());
   }
-  if (restartAt && (int32_t)(millis() - restartAt) >= 0) ESP.restart();
+  if (restartAt && (int32_t)(millis() - restartAt) >= 0) { histSave(); ESP.restart(); }   // planned restart (update, reboot): keep the history
   delay(2);
 }

@@ -53,9 +53,14 @@ Quick controls for every device. Tap a card (not its buttons) to open the device
 - **LED display:**
   - **Level colours:** Red → Blue, Red → Green, or **Custom**. Custom gives one colour picker per LED, listed **top LED first**,
     like the real strip.
+  - **Current level highlight** (slider 0–50 %): how much the top lit LED stands out. Half makes it brighter, half makes the LEDs below dimmer.
   - **LEDs used to show the level:** 1–8, counted from the bottom.
   - **Daytime display:** between these hours the level LEDs never go fully dark (they stay at least at *Minimum brightness*).
+- **Colour matching:** one brightness slider per LED (10–100 %), because colours look unequally bright to the eye.
+  **Light all LEDs for 60 s** shows every level LED at once, so you can compare them; then lower the ones that look too bright and press **Save matching**.
+- **After a restart** (power cut or update), a rule does not sound for a level the tank is already at. It fires only when the level actually rises or drops into it.
 - **Sensor problem:** when the ultrasonic sensor fails, all level LEDs on the tank **blink yellow rapidly**.
+- **While a device is updating,** its page says so. Settings and controls work again once it has restarted.
 - **Device and Advanced:** the same as for the switch.
 
 Every tank setting and rule is stored **on the tank itself**, so it keeps working without the hub.
