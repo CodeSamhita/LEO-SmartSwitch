@@ -48,6 +48,27 @@ Libraries: ESPAsyncWebServer + AsyncTCP (ESP32Async), ArduinoJson 7, Adafruit Ne
   - Quick white blinks: identify.
 - **Touch buttons** are off by default; turn them on in *Devices → Touch buttons* once the pads are wired.
 
+## Tank edge (`LEO_TankEdge/LEO_TankEdge.ino`, 1.0.1)
+Same board settings as the switch edge (ESP32C3 Dev Module, Minimal SPIFFS). Wiring follows
+tank_v9 / AquaNode v2.12:
+
+| Function | GPIO |
+|---|---|
+| HC-SR04 TRIG / ECHO | 4 / 3 |
+| 9× WS2812B (0–6 = level, 7 spare, 8 = status blink) | 2 |
+| LDR (higher = brighter) | 0 |
+| Push button to GND | 1 |
+| Buzzer (HIGH = sound) | 10 |
+
+- **Level:** 15 cm from the sensor = 100 %, 103 cm = 0 %.
+- **Alerts:** FULL at ≥ 95 % (long beeps, green) and LOW at ≤ 10 % (short beeps, red), 10 rounds each.
+  Alerts re-arm once the level is back between 15 and 90 %. The button silences the current alert.
+  The buzzer only sounds when the room is lit.
+- **Works without the hub:** level LEDs, alerts and the button all run on the tank itself.
+  The hub shows the level, distance and state.
+- **No sensor:** with no ultrasonic sensor, or no echo, it reports *Sensor not connected*: level LEDs off,
+  no alarms, red status blink.
+
 ## Hub status LED (1.2.1)
 The onboard RGB LED (GPIO 48, or 38 on DevKitC v1.1) gives the same faint 60 ms blink:
 - Green every 5 s: on WiFi.
