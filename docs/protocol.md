@@ -53,7 +53,7 @@ little-endian structs.
 | 5 | buzzer |
 | 6 | quiet from (hour) |
 | 7 | quiet to (hour) |
-| 8 | palette |
+| 8 | palette (0 red-blue, 1 red-green, 2 custom, 3 spectrum) |
 | 9 | LED count |
 | 10 | display from (hour) |
 | 11 | display to (hour) |

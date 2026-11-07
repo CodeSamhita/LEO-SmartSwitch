@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.9.3"
+#define HUB_FW            "1.9.4"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -1213,7 +1213,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function tset(idx,v){return cmd(tankMac,10,{idx:idx,f:+v})}\n"
   "function hrs(v){return [...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}\n"
   "/* the tank bar in the app looks like the real strip: same number of level LEDs, same colours, yellow when the sensor fails */\n"
-  "function ledCol(c,i,n){if(c&&c.palette==2&&c.colors&&c.colors[i])return c.colors[i];const t=n>1?i/(n-1):1,r=Math.round(255*(1-t)),v=Math.round(255*t);\n"
+  "function ledCol(c,i,n){if(c&&c.palette==2&&c.colors&&c.colors[i])return c.colors[i];if(c&&c.palette==3)return 'hsl('+Math.round((n>1?i/(n-1):1)*240)+',100%,50%)';const t=n>1?i/(n-1):1,r=Math.round(255*(1-t)),v=Math.round(255*t);\n"
   "  return c&&c.palette==1?`rgb(${r},${v},0)`:`rgb(${r},0,${v})`}\n"
   "function tankBar(d,h){const t=d.tank||{},c=t.cfg,n=c?(c.ledCount||7):9,ok=t.sensorOk!==false,lit=ok?Math.round((t.level||0)*n/100):0;\n"
   "  return `<div class=\"tankbar\" style=\"${h?'height:'+h+'px':''}\">${[...Array(n)].map((_,i)=>`<div class=\"seg\" style=\"${!ok?'background:#d9a400;opacity:.85':i<lit?'background:'+ledCol(c,i,n)+segLook(c,i,lit):''}\"></div>`).join('')}</div>`}\n"
@@ -1270,8 +1270,8 @@ static const char INDEX_HTML[] PROGMEM =
   "  </div>\n"
   "  <h3>LED display</h3>\n"
   "  <div class=\"card\">\n"
-  "    <label>Level colours${q('Colour of the level LEDs from the bottom to the top: red fading to blue, red fading to green, or Custom — pick your own colour for every LED.')}</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn ${c.palette==0?'p':''}\" onclick=\"tset(8,0)\">Red → Blue</button><button class=\"btn ${c.palette==1?'p':''}\" onclick=\"tset(8,1)\">Red → Green</button>${c.colors?`<button class=\"btn ${c.palette==2?'p':''}\" onclick=\"tset(8,2)\">Custom</button>`:''}</div>\n"
+  "    <label>Level colours${q('Colour of the level LEDs from the bottom to the top: red fading to blue, red fading to green, Spectrum (red, orange, yellow, green, cyan, blue), or Custom — pick your own colour for every LED.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn ${c.palette==0?'p':''}\" onclick=\"tset(8,0)\">Red → Blue</button><button class=\"btn ${c.palette==1?'p':''}\" onclick=\"tset(8,1)\">Red → Green</button><button class=\"btn ${c.palette==3?'p':''}\" onclick=\"tset(8,3)\">Spectrum</button>${c.colors?`<button class=\"btn ${c.palette==2?'p':''}\" onclick=\"tset(8,2)\">Custom</button>`:''}</div>\n"
   "    ${c.palette==2&&c.colors?`<div style=\"margin-top:10px\">${c.colors.slice(0,c.ledCount||7).map((col,i)=>`<div class=\"switchrow\" style=\"margin:4px 0\"><span>LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
   "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).reverse().join('')}\n"
   "      <div class=\"row\"><button class=\"btn\" onclick=\"presetColors()\">Preset: Red · greens · Blue</button><button class=\"btn p\" onclick=\"saveColors()\">Save colours</button></div>\n"
@@ -1286,15 +1286,6 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tMb\" type=\"number\" min=\"1\" max=\"60\" value=\"${c.minBright||6}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveShow()\">Save</button></div>\n"
   "    <p class=\"note\">${showOn?`Daytime display is on: ${String(c.showFrom).padStart(2,'0')}:00–${String(c.showTo).padStart(2,'0')}:00.`:'Daytime display is off.'}</p>\n"
   "  </div>\n"
-  "  ${c.gain?`<h3>Colour matching${q('Different colours look differently bright to the eye even at the same setting (green and yellow look brighter than blue or red). Press <b>Light all LEDs</b>, look at the tank, and lower the brightness of the LEDs that look too bright until all of them look even. Then press Save. This applies to every colour mode.')}</h3>\n"
-  "  <div class=\"card\">\n"
-  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn p\" onclick=\"tset(30,60).then(()=>toast('All level LEDs on for 60 s'))\">Light all LEDs for 60 s</button><button class=\"btn\" onclick=\"tset(30,0)\">Stop</button></div>\n"
-  "    ${[...Array(c.ledCount||7)].map((_,i)=>`<div class=\"switchrow\" style=\"margin:6px 0\"><span style=\"flex:0 0 96px\">LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
-  "      <span style=\"flex:0 0 22px;height:22px;border-radius:5px;background:${ledCol(c,i,c.ledCount||7)};filter:brightness(${c.gain[i]/100})\" data-sw=\"${i}\"></span>\n"
-  "      <input type=\"range\" min=\"10\" max=\"100\" value=\"${c.gain[i]}\" data-gain=\"${i}\" data-was=\"${c.gain[i]}\" oninput=\"matchPreview(this)\" onchange=\"this.blur()\" style=\"flex:1\">\n"
-  "      <span class=\"meta\" style=\"flex:0 0 40px;text-align:right\">${c.gain[i]} %</span></div>`).reverse().join('')}\n"
-  "    <div class=\"row\"><button class=\"btn\" onclick=\"resetMatching()\">All 100 %</button><button class=\"btn p\" onclick=\"saveMatching()\">Save matching</button></div>\n"
-  "  </div>`:''}\n"
   "  <h3>Device</h3>\n"
   "  <div class=\"card\">\n"
   "    <label>Name${q('The name shown in the app and in the Activity log.')}</label>\n"
@@ -1326,11 +1317,6 @@ static const char INDEX_HTML[] PROGMEM =
   "  const stops=[[212,167,44],[150,190,60],[85,150,45],[110,220,120]],mix=(a,b,f)=>a.map((x,k)=>Math.round(x+(b[k]-x)*f)),hex=c=>'#'+c.map(x=>x.toString(16).padStart(2,'0')).join('');\n"
   "  els.forEach((el,i)=>{let c;if(i===0)c=[229,57,53];else if(i===n-1&&n>1)c=[47,59,255];else{const f=n>3?(i-1)/(n-3):0,p=f*(stops.length-1),k=Math.min(Math.floor(p),stops.length-2);c=mix(stops[k],stops[k+1],p-k)}el.value=hex(c)});\n"
   "  toast('Preset filled in — press Save colours')}\n"
-  "function matchPreview(el){el.nextElementSibling.textContent=el.value+' %';const s=$(`[data-sw=\"${el.dataset.gain}\"]`);if(s)s.style.filter=`brightness(${el.value/100})`}\n"
-  "function resetMatching(){document.querySelectorAll('#tset input[data-gain]').forEach(el=>{el.value=100;matchPreview(el)});toast('Set to 100 % — press Save matching')}\n"
-  "async function saveMatching(){let n=0;for(const el of document.querySelectorAll('#tset input[data-gain]')){if(el.value===el.dataset.was)continue;\n"
-  "    if(!await tset(22+(+el.dataset.gain),el.value))return toast('Could not reach the hub');n++}\n"
-  "  toast(n?n+' LED'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
   "async function saveColors(){let n=0;for(const el of document.querySelectorAll('#tset input[data-led]')){if(el.value===el.dataset.was)continue;\n"
   "    if(!await tset(13+(+el.dataset.led),parseInt(el.value.slice(1),16)))return toast('Could not reach the hub');n++}\n"
   "  toast(n?n+' colour'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
@@ -1675,7 +1661,7 @@ void webBegin() {
       if (idx >= 13 && idx <= 20) activity(dn + ": LED " + String(idx - 12) + " colour set to " + hx + " (from " + who(r) + ")", false);
       if (idx == 21) activity(dn + ": current-level highlight set to " + String((int)f) + " % (from " + who(r) + ")", false);
       if (idx >= 22 && idx <= 29) activity(dn + ": LED " + String(idx - 21) + " colour-matching brightness set to " + String((int)f) + " % (from " + who(r) + ")", false);
-      String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx == 8 ? String(f >= 2 ? "custom" : f != 0 ? "red to green" : "red to blue") : idx == 9 || idx == 12 ? String((int)f) :
+      String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx == 8 ? String(f >= 3 ? "spectrum" : f >= 2 ? "custom" : f != 0 ? "red to green" : "red to blue") : idx == 9 || idx == 12 ? String((int)f) :
                  idx <= 2 ? String(f, 1) + " cm" : idx <= 4 ? String((int)f) + " %" : String((int)f) + ":00";
       if (idx >= 1 && idx <= 12) activity(dn + ": " + names[idx] + " set to " + v + " (from " + who(r) + ")", false);
     }

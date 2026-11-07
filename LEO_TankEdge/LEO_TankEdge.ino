@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.7.4-tank"
+#define EDGE_FW           "1.7.5-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -352,6 +352,15 @@ void buttonTick() {
 // level colours: red at the bottom fading to blue (palette 0) or green (palette 1) at the top
 void gradColor(int i, uint8_t& r, uint8_t& g, uint8_t& b) {
   if (palette == 2 && i >= 0 && i < 8) { r = custom[i][0]; g = custom[i][1]; b = custom[i][2]; return; }   // your own colours
+  if (palette == 3) {                                    // spectrum: red -> orange -> yellow -> green -> cyan -> blue (hue 0..240)
+    float h = (ledCount > 1 ? (float)i / (ledCount - 1) : 1) * 240.0f, x = 1 - fabsf(fmodf(h / 60.0f, 2) - 1);
+    float rf, gf, bf;
+    if (h < 60)       { rf = 1; gf = x; bf = 0; }
+    else if (h < 120) { rf = x; gf = 1; bf = 0; }
+    else if (h < 180) { rf = 0; gf = 1; bf = x; }
+    else              { rf = 0; gf = x; bf = 1; }
+    r = (uint8_t)(rf * 255); g = (uint8_t)(gf * 255); b = (uint8_t)(bf * 255); return;
+  }
   float t = ledCount > 1 ? (float)i / (ledCount - 1) : 1;
   r = (uint8_t)(255 * (1 - t)); g = palette == 1 ? (uint8_t)(255 * t) : 0; b = palette == 1 ? 0 : (uint8_t)(255 * t);
 }
@@ -491,7 +500,7 @@ void applySetting(uint8_t idx, float v) {
     case 5: buzzerOn = v != 0; prefs.putBool("bz", buzzerOn); if (!buzzerOn && !beepUntil) buzzer(false); break;
     case 6: if (v >= 0 && v < 24) { quietFrom = (uint8_t)v; prefs.putUChar("qf", quietFrom); } break;
     case 7: if (v >= 0 && v < 24) { quietTo = (uint8_t)v; prefs.putUChar("qt", quietTo); } break;
-    case 8: palette = v >= 2 ? 2 : v >= 1 ? 1 : 0; prefs.putUChar("pal", palette); break;
+    case 8: palette = v >= 3 ? 3 : v >= 2 ? 2 : v >= 1 ? 1 : 0; prefs.putUChar("pal", palette); break;   // 0 red-blue, 1 red-green, 2 custom, 3 spectrum
     case 13: case 14: case 15: case 16: case 17: case 18: case 19: case 20: {             // custom colour of one LED
       uint32_t rgb = (uint32_t)v; uint8_t* c = custom[idx - 13];
       c[0] = (rgb >> 16) & 255; c[1] = (rgb >> 8) & 255; c[2] = rgb & 255;
@@ -687,7 +696,7 @@ void setup() {
   if (fullPct > 100 || lowPct + 10 >= fullPct) { fullPct = 95; lowPct = 10; }
   buzzerOn = prefs.getBool("bz", true);
   quietFrom = prefs.getUChar("qf", quietFrom) % 24; quietTo = prefs.getUChar("qt", quietTo) % 24;
-  palette = prefs.getUChar("pal", 0); if (palette > 2) palette = 0;
+  palette = prefs.getUChar("pal", 0); if (palette > 3) palette = 0;
   ledCount = prefs.getUChar("leds", 7); if (ledCount < 1 || ledCount > MAX_LEVEL_LEDS) ledCount = 7;
   showFrom = prefs.getUChar("sf", showFrom) % 24; showTo = prefs.getUChar("st", showTo) % 24;
   minBright = prefs.getUChar("mb", minBright); if (minBright < 1 || minBright > 60) minBright = 6;
