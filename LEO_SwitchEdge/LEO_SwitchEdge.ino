@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.1.0-sw"
+#define EDGE_FW           "2.1.1-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -363,7 +363,7 @@ void linkTick() {
   if (hubKnown && k < 2) { addPeer(hubMac); sendHello(hubMac); }
   else { addPeer(BCAST); sendHello(BCAST); }
 }
-/* Power / status LED: one slow breath, then dark (saves power, not distracting).
+/* Power / status LED: one slow breath, then a pause (faint glow by day, dark at night).
    Colour = status, peak brightness = time of day (from the hub) x status.
      green  : on and linked to the hub          (calm: long dark pause)
      amber  : on, looking for the hub           (shorter pause)
@@ -395,8 +395,12 @@ void ledTick() {
     uint32_t t = millis() % (breath + gap);
     float lvl = 0;
     if (t < breath) { float x = (1 - cosf(2 * PI * t / breath)) / 2; lvl = x * x; }   // smooth, eye-friendly curve
-    float peak = (2.5f + daylight() * 15.5f) * boost / 255.0f;   // night ~2.5/255, day ~18/255 (x status boost)
-    float k = lvl * peak;
+    // daytime: rests at a faint glow and breathes up to the day maximum;
+    // night: completely dark between breaths. Dawn/dusk blend the two.
+    float day  = daylight();
+    float peak = (2.5f + day * 15.5f) * boost / 255.0f;          // night ~2.5/255, day ~18/255 (x status boost)
+    float base = day * 3.0f / 255.0f;                             // day minimum ~3/255, night 0
+    float k = base + lvl * (peak - base);
     c = pix.Color((uint8_t)(r * k + 0.5f), (uint8_t)(g * k + 0.5f), (uint8_t)(b * k + 0.5f));
   }
   if (c != shown) { shown = c; pix.setPixelColor(0, c); pix.show(); }   // only talk to the LED when it changes

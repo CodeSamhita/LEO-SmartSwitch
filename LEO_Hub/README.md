@@ -39,7 +39,8 @@ Libraries: ESPAsyncWebServer + AsyncTCP (ESP32Async), ArduinoJson 7, Adafruit Ne
   The hub logs the change when it hears the switch again. Unwired pins are pulled down and
   never trigger. For modules that pull LOW when touched, set `TOUCH_ACTIVE_HIGH 0`.
   Night lock only blocks the app, not a person at the switch.
-- **Status LED** (replaces the power LED): one slow breath, then dark.
+- **Status LED** (replaces the power LED): one slow breath, then a pause. By day the pause
+  keeps a faint glow (about 3/255) so the switch visibly has power. At night the pause is completely dark.
   Green with a long pause means linked; amber with a shorter pause means looking for the hub;
   blue means never paired; cyan means a firmware update is in progress; quick white blinks mean identify.
   Brightness follows the time of day sent by the hub, from about 18/255 at midday down to
