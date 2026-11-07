@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.1.0-tank"
+#define EDGE_FW           "1.2.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -468,11 +468,17 @@ void statusPrint() {                                // once every 5 s on USB, fo
 }
 
 /* ------------------------------ setup / loop ------------------------ */
-void selfTest() {                                   // short colour sweep + chirp (chirp only in a lit room)
-  const uint32_t cols[3] = { strip.Color(40, 0, 0), strip.Color(0, 0, 40), strip.Color(0, 40, 0) };
-  for (int k = 0; k < 3; ++k) { for (int i = 0; i < NUM_LEDS; ++i) strip.setPixelColor(i, cols[k]); strip.show(); delay(250); }
+/* Power-on check, before anything else: red -> blue -> green sweep over the whole strip (~1.2 s)
+   = "power is good, LEDs work". The room light is read FIRST from our own LDR, so at night the
+   sweep is barely visible (3/255) and silent; in a lit room it is 25/255 with a short chirp.   */
+void selfTest() {
+  long s = 0; for (int i = 0; i < 16; ++i) s += analogRead(LDR_PIN);
+  ldrRaw = s / 16; litState = ldrRaw > (LIT_ON_LDR + LIT_OFF_LDR) / 2;
+  uint8_t k = litState ? 25 : 3;
+  const uint32_t cols[3] = { strip.Color(k, 0, 0), strip.Color(0, 0, k), strip.Color(0, k, 0) };
+  for (int c = 0; c < 3; ++c) { for (int i = 0; i < NUM_LEDS; ++i) strip.setPixelColor(i, cols[c]); strip.show(); delay(400); }
   strip.clear(); strip.show();
-  ldrTick(); if (roomLit()) { buzzer(true); delay(60); buzzer(false); }
+  if (litState) { buzzer(true); delay(60); buzzer(false); }
 }
 
 void setup() {

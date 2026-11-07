@@ -77,6 +77,14 @@ If no tank is online, the clock decides instead (07:00–18:00 = day).
 The tank's buzzer stays quiet when the room is dark **or** between 22:00 and 06:00.
 The tank card in the web app shows *Room light: bright/dark (reading)*.
 
+## Power-on light (hub 1.4.0, switch 2.4.0, tank 1.2.0)
+The moment a board gets power, before any WiFi, hub or file work, its LED lights for about 1.5 s.
+This shows that power is good and the board is booting.
+- **Hub and switch:** a soft warm-white glow. Each saves the last room light it heard, so after a
+  power cut it is 14/255 if the room was lit and 3/255 if it was dark or never known.
+- **Tank:** reads its own LDR first, then runs its red, blue and green sweep: 25/255 with a chirp in a
+  lit room, 3/255 and silent in a dark one.
+
 ## Hub status LED
 The onboard RGB LED (GPIO 48, or 38 on DevKitC v1.1) gives the same quick faint breath:
 - Green every 5 s: on WiFi.

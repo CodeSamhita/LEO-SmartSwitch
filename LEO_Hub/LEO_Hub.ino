@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.3.0"
+#define HUB_FW            "1.4.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -152,6 +152,16 @@ bool     staUp = false, apUp = false;
 Adafruit_NeoPixel ledA(1, 48, NEO_GRB + NEO_KHZ800), ledB(1, 38, NEO_GRB + NEO_KHZ800);
 // room light for every device, taken from the tank's LDR: 1 lit, 0 dark, 255 unknown (no tank online -> clock)
 uint8_t roomLight = 255;
+uint8_t savedRoom = 0;                    // last known room light, kept in flash for the power-on glow
+/* Power-on glow: soft warm white the instant the hub gets power, gone after ~1.5 s.
+   Peak 14/255 if the room was lit last time, 3/255 if it was dark (or never known). */
+#define BOOT_GLOW_MS  1500
+uint8_t bootGlowLevel() {
+  uint32_t t = millis(); if (t >= BOOT_GLOW_MS) return 0;
+  uint8_t peak = savedRoom == 1 ? 14 : 3;
+  if (t < BOOT_GLOW_MS - 300) return peak;
+  return (uint8_t)(peak * (BOOT_GLOW_MS - t) / 300);
+}
 #define ROOM_LIT_ON   120                 // same dead band as the tank: lit above 120, dark again below 80
 #define ROOM_LIT_OFF  80
 uint32_t staDownSince = 0, lastStaTry = 0, lastPush = 0, restartAt = 0;
@@ -1194,6 +1204,13 @@ void serialTick() {
 
 /* ------------------------------ setup / loop ------------------------ */
 void setup() {
+  // power-on glow FIRST (before files, WiFi or ESP-NOW): "power is good, booting".
+  // Brightness from the room light saved last time - after a power cut we don't know day/night yet.
+  prefs.begin("leohub", false);
+  savedRoom = prefs.getUChar("room", 0);             // never known -> assume dark (dim)
+  ledA.begin(); ledB.begin();
+  { uint8_t k = bootGlowLevel(); uint32_t c = ledA.Color(k, k * 3 / 5, k / 4);
+    ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
   devLock = xSemaphoreCreateMutex(); consoleLock = xSemaphoreCreateMutex(); actLock = xSemaphoreCreateMutex();
   rxq = xQueueCreate(24, sizeof(RxItem)); txq = xQueueCreate(16, sizeof(TxItem)); txres = xQueueCreate(32, sizeof(TxResult));
   Serial.begin(115200); Serial.setTxTimeoutMs(0);
@@ -1203,7 +1220,6 @@ void setup() {
 
   if (!LittleFS.begin(false)) { delay(100); if (!LittleFS.begin(false)) LittleFS.begin(true); }
   LittleFS.remove(EDGE_BIN);                         // leftover from an interrupted edge update
-  prefs.begin("leohub", false);
   cfgSsid = prefs.getString("ssid", ""); cfgPass = prefs.getString("pass", "");
   hubName = prefs.getString("name", "LEO Home Hub");
   pwHash  = prefs.getString("pw", "");
@@ -1217,7 +1233,6 @@ void setup() {
   dbg("LEO Hub " HUB_FW " " + hubId);
 
   WiFi.persistent(false);
-  ledA.begin(); ledB.begin(); ledA.clear(); ledA.show(); ledB.clear(); ledB.show();
   WiFi.onEvent(wifiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname("LEO-Hub");
@@ -1242,6 +1257,11 @@ void setup() {
    Peak 5/255 when the room is lit, 2/255 when dark (room light from the tank's LDR, else the clock). */
 void hubLedTick() {
   static uint32_t last = 0, shown = 0xFFFFFFFF; if (millis() - last < 20) return; last = millis();
+  if (millis() < BOOT_GLOW_MS) {                            // power-on glow still fading out
+    uint8_t k = bootGlowLevel(); uint32_t c = ledA.Color(k, k * 3 / 5, k / 4);
+    if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
+    return;
+  }
   uint8_t r, g, b; uint32_t period;
   if (apUp)                          { r = 0; g = 0; b = 1; period = 2000; }
   else if (!staUp)                   { r = 1; g = 1; b = 0; period = 2000; }
@@ -1320,6 +1340,7 @@ void loop() {
     if (room != roomLight) {
       dbg(String("Room light: ") + (room == 1 ? "bright" : room == 0 ? "dark" : "unknown (no tank) - using the clock") + (ldr >= 0 ? " (LDR " + String(ldr) + ")" : ""));
       roomLight = room; stateDirty = true;
+      if (room != 255 && room != savedRoom) { savedRoom = room; prefs.putUChar("room", room); }   // for the next power-on glow
     }
     if (mask != prevOnline) { prevOnline = mask; stateDirty = true; }
     static bool prevLock = false; bool lk = lockActive();

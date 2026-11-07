@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.3.0-sw"
+#define EDGE_FW           "2.4.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -126,6 +126,7 @@ uint8_t  channel = 1, txSeq = 0;
 uint8_t scanStep = 0;
 int16_t  hubMins = -1; uint32_t hubMinsAt = 0;   // time of day from the hub; keeps running locally if the hub goes away
 uint8_t  hubRoom = 255; uint32_t hubRoomAt = 0;  // room light from the tank's LDR, via the hub (1 lit, 0 dark)
+uint8_t  savedRoom = 0;                           // last room light heard, kept in flash for the power-on glow
 uint32_t lastState = 0, lastScanStep = 0, lastVerified = 0, linkedSince = 0, identifyUntil = 0, restartAt = 0;
 bool     stateDirty = true;
 bool     otaActive = false; uint32_t otaSize = 0, otaWritten = 0;
@@ -327,7 +328,10 @@ void handlePacket(const RxItem& it) {
     if (blen >= sizeof(LeoHdr) + 2) {
       MsgPing p = {}; p.room = 255; memcpy(&p, it.data, min(blen, sizeof(p)));
       if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); }
-      if (blen >= sizeof(MsgPing) && p.room != 255) { hubRoom = p.room; hubRoomAt = millis(); }
+      if (blen >= sizeof(MsgPing) && p.room != 255) {
+        hubRoom = p.room; hubRoomAt = millis();
+        if (p.room != savedRoom) { savedRoom = p.room; prefs.putUChar("room", savedRoom); }   // for the next power-on glow
+      }
     }
     return;
   }
@@ -394,11 +398,25 @@ uint8_t breathLevel(uint32_t period, uint8_t peak) { // quick sine breath at the
   float s = sinf(PI * t / len);
   return (uint8_t)(s * s * peak + 0.5f);
 }
+/* Power-on glow: soft warm white, on the instant the board gets power, gone after ~1.5 s.
+   Peak 14/255 if the room was lit when we last heard, 3/255 if it was dark (or never known). */
+#define BOOT_GLOW_MS  1500
+uint8_t bootGlowLevel() {
+  uint32_t t = millis(); if (t >= BOOT_GLOW_MS) return 0;
+  uint8_t peak = savedRoom == 1 ? 14 : 3;
+  if (t < BOOT_GLOW_MS - 300) return peak;                         // on at once, hold
+  return (uint8_t)(peak * (BOOT_GLOW_MS - t) / 300);               // fade out over the last 0.3 s
+}
+uint32_t bootGlowColor(uint8_t k) { return pix.Color(k, k * 3 / 5, k / 4); }
+void bootGlowShow() { pix.setPixelColor(0, bootGlowColor(bootGlowLevel())); pix.show(); }
+
 void ledTick() {
   static uint32_t last = 0; static uint32_t shown = 0xFFFFFFFF;
   if (millis() - last < 30) return; last = millis();
   uint32_t c;
-  if (millis() < identifyUntil) {
+  if (millis() < BOOT_GLOW_MS) {
+    c = bootGlowColor(bootGlowLevel());
+  } else if (millis() < identifyUntil) {
     c = ((millis() / 150) % 2) ? pix.Color(90, 90, 90) : 0;
   } else {
     uint8_t r, g, b; uint32_t period;
@@ -423,15 +441,19 @@ void serialTick() {                                 // USB: "UNPAIR" forgets the
 
 /* ------------------------------ setup / loop ------------------------ */
 void setup() {
+  // power-on glow FIRST (before files, radio or hub): "power is good, booting". Brightness from the
+  // room light we last heard (saved), because after a power cut we don't know if it is day or night yet.
+  prefs.begin("leoedge", false);
+  savedRoom = prefs.getUChar("room", 0);          // never told -> assume dark (dim)
+  pix.begin(); pix.setBrightness(255);            // ledTick() sets the real (low) levels
+  bootGlowShow();
   rxq = xQueueCreate(16, sizeof(RxItem));
   Serial.begin(115200); Serial.setTxTimeoutMs(0);
-  pix.begin(); pix.setBrightness(255);   // ledTick() sets the real (low) levels pix.setPixelColor(0, 0); pix.show();
 
   if (!LittleFS.begin(false)) { delay(100); if (!LittleFS.begin(false)) LittleFS.begin(true); }
   configLoad();
   relaysInit();                                   // all OFF, glitch-safe
   touchInit();
-  prefs.begin("leoedge", false);
   if (prefs.getBytes("hub", hubMac, 6) == 6) hubKnown = true;
   if (prefs.getBytes("key", key, 16) == 16) hasKey = true;
   uint8_t ch = prefs.getUChar("ch", 1);
