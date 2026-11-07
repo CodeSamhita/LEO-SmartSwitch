@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.0.2"
+#define HUB_FW            "2.0.3"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -252,7 +252,7 @@ void dbg(const String& msg) {
   char line[CONSOLE_LINE_LEN], stamp[24];
   time_t now = time(nullptr);
   if (now > 1700000000) {                       // clock set by NTP: "26-11-07 08:44:12"
-    struct tm tm; localtime_r(&now, &tm); strftime(stamp, sizeof(stamp), "%y-%m-%d %H:%M:%S", &tm);
+    struct tm tm; localtime_r(&now, &tm); strftime(stamp, sizeof(stamp), "%y-%m-%d %I:%M:%S %p", &tm);
   } else {                                      // before NTP: seconds since boot
     snprintf(stamp, sizeof(stamp), "boot+%lus", (unsigned long)(millis() / 1000));
   }
@@ -418,7 +418,8 @@ bool lockActive() {
   int m = tm.tm_hour * 60 + tm.tm_min;
   return lockFrom <= lockTo ? (m >= lockFrom && m < lockTo) : (m >= lockFrom || m < lockTo);
 }
-String hhmm(int m) { char b[6]; snprintf(b, sizeof(b), "%02d:%02d", m / 60, m % 60); return String(b); }
+String hhmm(int m) { char b[6]; snprintf(b, sizeof(b), "%02d:%02d", m / 60, m % 60); return String(b); }   // for the API / time inputs
+String hm12(int m) { char b[10]; int h = m / 60 % 24; snprintf(b, sizeof(b), "%d:%02d %s", h % 12 ? h % 12 : 12, m % 60, h < 12 ? "AM" : "PM"); return String(b); }   // for log text
 int parseHHMM(const String& s, int dflt) { int h, m; if (sscanf(s.c_str(), "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60) return h * 60 + m; return dflt; }
 
 /* ------------------------------- auth ------------------------------ */
@@ -1323,7 +1324,7 @@ static const char INDEX_HTML[] PROGMEM =
   "\n"
   "/* activity */\n"
   "async function loadActivity(){const a=await jget('/api/activity');if(!a)return;\n"
-  "  $('#actlist').innerHTML=a.items.length?a.items.map(x=>`<div class=\"act ${x.blocked?'blocked':''}\"><time>${x.t?((d,p)=>`${p(d.getFullYear()%100)}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`)(new Date(x.t*1000),n=>String(n).padStart(2,'0')):'(clock not set)'}</time><span>${esc(x.msg)}</span></div>`).join(''):'<div class=\"meta\">Nothing recorded yet.</div>'}\n"
+  "  $('#actlist').innerHTML=a.items.length?a.items.map(x=>`<div class=\"act ${x.blocked?'blocked':''}\"><time>${x.t?((d,p)=>`${p(d.getFullYear()%100)}-${p(d.getMonth()+1)}-${p(d.getDate())} ${hm(d,1)}`)(new Date(x.t*1000),n=>String(n).padStart(2,'0')):'(clock not set)'}</time><span>${esc(x.msg)}</span></div>`).join(''):'<div class=\"meta\">Nothing recorded yet.</div>'}\n"
   "\n"
   "/* hub page */\n"
   "function renderLock(){const L=(S.hub||{}).lock||{};$('#lockManual').classList.toggle('on',!!L.manual);$('#lockSched').classList.toggle('on',!!L.sched);\n"
@@ -1388,7 +1389,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function otaNote(mac){const o=S.ota||{};return o.active&&o.mac===mac?`<div class=\"banner info\"><b>Updating firmware… ${o.pct||0}% — settings and controls work again when it has restarted.</b></div>`:''}\n"
   "function tankDev(){return S.devices.find(x=>x.mac===tankMac)}\n"
   "function tset(idx,v){return cmd(tankMac,10,{idx:idx,f:+v})}\n"
-  "function hrs(v){return [...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}\n"
+  "function hrs(v){return [...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${h12(h)}</option>`).join('')}\n"
   "/* the tank bar in the app looks like the real strip: same number of level LEDs, same colours, yellow when the sensor fails */\n"
   "function ledCol(c,i,n){if(c&&c.palette==2&&c.colors&&c.colors[i])return c.colors[i];if(c&&c.palette==3)return 'hsl('+Math.round((n>1?i/(n-1):1)*240)+',100%,50%)';const t=n>1?i/(n-1):1,r=Math.round(255*(1-t)),v=Math.round(255*t);\n"
   "  return c&&c.palette==1?`rgb(${r},${v},0)`:`rgb(${r},0,${v})`}\n"
@@ -1443,7 +1444,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  <h3>Buzzer</h3>\n"
   "  <div class=\"card\">\n"
   "    <div class=\"switchrow\" style=\"margin-top:0\"><span>Buzzer${q('Turn the beeping off completely. The LEDs still flash for alarms and the app still shows them.')}</span><button class=\"tgl ${c.buzzer?'on':''}\" onclick=\"tankBuzzer(this)\"></button></div>\n"
-  "    ${globalNote(`Quiet hours ${String(G.quietFrom).padStart(2,'0')}:00–${String(G.quietTo).padStart(2,'0')}:00 (no sounds)`)}\n"
+  "    ${globalNote(`Quiet hours ${h12(G.quietFrom)}–${h12(G.quietTo)} (no sounds)`)}\n"
   "  </div>\n"
   "  </div><div data-tab=\"display\">\n"
   "  <h3>LED display</h3>\n"
@@ -1460,7 +1461,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tLeds\" type=\"number\" min=\"1\" max=\"8\" value=\"${c.ledCount||7}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveLeds()\">Save</button></div>\n"
   "    <label style=\"margin-top:12px\">Daytime minimum brightness (1–60)${q('During the daytime hours (a global setting) the level LEDs never go fully dark: they stay at least this bright, even in a dark room. 1 is barely visible, 60 is clearly visible.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tMb\" type=\"number\" min=\"1\" max=\"60\" value=\"${c.minBright||6}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveShow()\">Save</button></div>\n"
-  "    ${globalNote(`Daytime hours ${String(G.dayFrom).padStart(2,'0')}:00–${String(G.dayTo).padStart(2,'0')}:00`)}\n"
+  "    ${globalNote(`Daytime hours ${h12(G.dayFrom)}–${h12(G.dayTo)}`)}\n"
   "  </div>\n"
   "  </div><div data-tab=\"setup\">\n"
   "  <h3>Status labels</h3>\n"
@@ -1567,10 +1568,11 @@ static const char INDEX_HTML[] PROGMEM =
   "  go();clearInterval(chartTimer);chartTimer=setInterval(go,20000);\n"
   "  const d=$(det);if(d)d.open=false;\n"
   "}\n"
-  "function hm(t){return String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0')}\n"
+  "function h12(h){h=+h;return (h%12||12)+' '+(h<12?'AM':'PM')}\n"
+  "function hm(t,s){const h=t.getHours();return (h%12||12)+':'+String(t.getMinutes()).padStart(2,'0')+(s?':'+String(t.getSeconds()).padStart(2,'0'):'')+' '+(h<12?'AM':'PM')}\n"
   "let chartRange='day';\n"
   "function setRange(r){chartRange=r;pageExtras(page)}\n"
-  "function hms(t){return hm(t)+':'+String(t.getSeconds()).padStart(2,'0')}\n"
+  "function hms(t){return hm(t,1)}\n"
   "async function loadChart(mac,box,unit){\n"
   "  const el=$(box);if(!el)return;\n"
   "  const week=chartRange==='yday'||chartRange==='week',fineR=chartRange==='h1',mq='/api/history?mac='+encodeURIComponent(mac);\n"
@@ -1604,7 +1606,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  const dec=(hi-lo)<10?1:0,fmt=x=>x.toFixed(dec);\n"
   "  let g='';[0,.5,1].forEach(f=>{const val=lo+(hi-lo)*f,y=Y(val);g+=`<line x1=\"${pl}\" x2=\"${W-pr}\" y1=\"${y}\" y2=\"${y}\" stroke=\"#25303a\"/><text x=\"${pl-4}\" y=\"${y+3}\" fill=\"#7d8b97\" font-size=\"9\" text-anchor=\"end\">${fmt(val)}</text>`});\n"
   "  const lbl=(i,txt,anc)=>`<text x=\"${X(i)}\" y=\"${H-4}\" fill=\"#7d8b97\" font-size=\"9\" text-anchor=\"${anc||'middle'}\">${txt}</text>`;\n"
-  "  if(chartRange==='yday')[0,6,12,18].forEach(hh=>{g+=lbl(hh,String(hh).padStart(2,'0')+':00',hh?'middle':'start')});\n"
+  "  if(chartRange==='yday')[0,6,12,18].forEach(hh=>{g+=lbl(hh,h12(hh),hh?'middle':'start')});\n"
   "  else{const parts=n>8?4:Math.max(1,n-1);for(let k=parts;k>=0;k--){const i=Math.round((n-1)*(parts-k)/parts),t=new Date(t0+i*step);\n"
   "    g+=lbl(i,!k&&!week?'now':(chartRange==='week'?t.toLocaleDateString([], {weekday:'short'})+' '+hm(t):hm(t)),k===parts?'start':k?'middle':'end')}}\n"
   "  const last=pts[pts.length-1],col=unit==='%'?'var(--water)':'var(--warn)',hrsPer=h.step/3600,u=unit==='%'?' %':' W';\n"
@@ -1984,8 +1986,8 @@ void webBegin() {
     if (j["from"].is<const char*>()) { lockFrom = parseHHMM(j["from"].as<String>(), lockFrom); prefs.putInt("lockF", lockFrom); }
     if (j["to"].is<const char*>())   { lockTo = parseHHMM(j["to"].as<String>(), lockTo); prefs.putInt("lockT", lockTo); }
     if (j["manual"].is<bool>()) { lockManual = j["manual"].as<bool>(); prefs.putBool("lockM", lockManual); activity(String("Night lock ") + (lockManual ? "turned ON" : "turned OFF") + " (from " + who(r) + ")", false); }
-    if (j["sched"].is<bool>())  { lockSched = j["sched"].as<bool>(); prefs.putBool("lockS", lockSched); activity(String("Night lock schedule ") + (lockSched ? "enabled " + hhmm(lockFrom) + "-" + hhmm(lockTo) : String("disabled")) + " (from " + who(r) + ")", false); }
-    if (j["from"].is<const char*>() || j["to"].is<const char*>()) activity("Night lock hours set to " + hhmm(lockFrom) + "-" + hhmm(lockTo) + " (from " + who(r) + ")", false);
+    if (j["sched"].is<bool>())  { lockSched = j["sched"].as<bool>(); prefs.putBool("lockS", lockSched); activity(String("Night lock schedule ") + (lockSched ? "enabled " + hm12(lockFrom) + "-" + hm12(lockTo) : String("disabled")) + " (from " + who(r) + ")", false); }
+    if (j["from"].is<const char*>() || j["to"].is<const char*>()) activity("Night lock hours set to " + hm12(lockFrom) + " - " + hm12(lockTo) + " (from " + who(r) + ")", false);
     stateDirty = true; jsonOk(r);
   }));
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/appass", [](AsyncWebServerRequest* r, JsonVariant& j) {

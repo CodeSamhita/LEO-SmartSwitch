@@ -95,5 +95,5 @@ with the date and time. **Clear log** deletes it.
 - **Hub:** name, restart, and hub firmware update.
 - **Advanced:**
   - Chip details.
-  - The **live log**, with a Clear button. Its time stamps read `yy-mm-dd hh:mm:ss`.
+  - The **live log**, with a Clear button. Its time stamps read `yy-mm-dd h:mm:ss AM/PM`. All times in the app use the 12-hour clock.
   - **Factory reset the hub.**
