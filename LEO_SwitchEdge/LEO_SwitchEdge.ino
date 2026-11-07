@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.0.0-sw"
+#define EDGE_FW           "2.0.1-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -118,6 +118,7 @@ bool     hubKnown = false, linked = false;
 uint8_t  key[16]; bool hasKey = false;
 uint32_t nonce = 0, txCtr = 0, rxCtr = 0;
 uint8_t  channel = 1, txSeq = 0;
+uint8_t scanStep = 0;
 uint32_t lastState = 0, lastScanStep = 0, lastVerified = 0, linkedSince = 0, identifyUntil = 0, restartAt = 0;
 bool     stateDirty = true;
 bool     otaActive = false; uint32_t otaSize = 0, otaWritten = 0;
@@ -226,7 +227,7 @@ void sendOtaAck(uint8_t phase, uint32_t off, bool ok, const char* err) {
 
 void goSearching(const char* why) {
   if (linked) dbg(String("Hub link lost: ") + why);
-  linked = false; lastScanStep = 0;
+  linked = false; lastScanStep = 0; scanStep = 0;                 // retry the hub's last channel first
   do { nonce = esp_random(); } while (!nonce);                  // fresh session: old packets can't be replayed
   txCtr = 0; rxCtr = 0;
 }
@@ -324,9 +325,8 @@ void linkTick() {
   }
   if (millis() - lastScanStep < SCAN_DWELL_MS) return;
   lastScanStep = millis();
-  static uint8_t step = 0;
   uint8_t saved = prefs.getUChar("ch", 0);
-  uint8_t k = step++ % 15;                         // 0,1 -> remembered channel; 2..14 -> channels 1..13
+  uint8_t k = scanStep++ % 15;                        // 0,1 -> remembered channel; 2..14 -> channels 1..13
   uint8_t ch = (k < 2 && saved) ? saved : (uint8_t)((k < 2 ? k : k - 2) % 13 + 1);
   setChannel(ch);
   if (hubKnown && k < 2) { addPeer(hubMac); sendHello(hubMac); }

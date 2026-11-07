@@ -44,7 +44,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.1.1"
+#define HUB_FW            "1.1.2"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -102,6 +102,9 @@ struct Dev {
   uint32_t txCtr, rxCtr;
   uint32_t lastSeen;     // millis of last VERIFIED packet
   uint32_t lastPing;
+  bool     pingRetry;                     // last packet to it was not acknowledged: ping again soon
+  uint8_t  failRun;                       // unacknowledged packets in a row
+  uint16_t txSent, txFail;                // radio delivery stats for the current session
   int8_t   rssi;
   uint32_t uptime;
   // switch
@@ -125,7 +128,8 @@ SemaphoreHandle_t devLock;
 struct DevGuard { DevGuard() { xSemaphoreTake(devLock, portMAX_DELAY); } ~DevGuard() { xSemaphoreGive(devLock); } };
 
 struct TxItem { uint8_t mac[6]; MsgCmd cmd; };
-QueueHandle_t rxq, txq;
+struct TxResult { uint8_t mac[6]; bool ok; };
+QueueHandle_t rxq, txq, txres;
 
 Preferences prefs;
 String cfgSsid, cfgPass, hubName, apPass, pwHash;
@@ -372,7 +376,11 @@ void onRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   it.rssi = info->rx_ctrl ? info->rx_ctrl->rssi : 0; it.len = (uint8_t)len; memcpy(it.data, data, len);
   xQueueSend(rxq, &it, 0);
 }
-void onSent(const esp_now_send_info_t*, esp_now_send_status_t) {}
+void onSent(const esp_now_send_info_t* info, esp_now_send_status_t st) {   // radio-level ACK from the edge
+  if (!info || !info->des_addr) return;
+  TxResult r; memcpy(r.mac, info->des_addr, 6); r.ok = (st == ESP_NOW_SEND_SUCCESS);
+  xQueueSend(txres, &r, 0);
+}
 
 String relayName(const Dev& d, int r) { return (r >= 0 && r < 4 && d.rname[r][0]) ? String(d.rname[r]) : ("Relay " + String(r + 1)); }
 
@@ -436,7 +444,7 @@ void handleHello(const RxItem& it) {
   MsgHello m; memcpy(&m, it.data, sizeof(m));
   const uint8_t devType = m.h.dev;
   bool pairingOpen = millis() < pairingUntil;
-  int i; bool giveKey = false; bool added = false; uint8_t key[16];
+  int i; bool giveKey = false; bool added = false; uint8_t key[16]; String relinkNote;
   {
     DevGuard g;
     i = findDev(it.mac);
@@ -457,8 +465,15 @@ void handleHello(const RxItem& it) {
       else { dbg("Device " + macStr(it.mac) + " has no key - press 'Allow new devices' to re-pair it"); return; }
     }
     if (!d.hasKey) { dbg("Device " + macStr(it.mac) + " has a key this hub doesn't know - unpair it (USB: UNPAIR)"); return; }
+    if (d.session && d.session != m.nonce && !added) {           // a re-link: say what the link looked like
+      relinkNote = String(d.name) + " re-linked: heard " +
+        (d.lastSeen ? String((millis() - d.lastSeen) / 1000) + "s ago" : String("never")) +
+        ", lost " + String(d.txFail) + "/" + String(d.txSent) +
+        ", " + String(it.rssi) + "dBm, ch " + String(WiFi.channel());
+    }
     d.type = devType; copyStr(d.fw, sizeof(d.fw), m.fw);
     d.session = m.nonce; d.txCtr = 0; d.rxCtr = 0; d.rssi = it.rssi;
+    d.txSent = 0; d.txFail = 0; d.pingRetry = false; d.failRun = 0;
     memcpy(key, d.key, 16);
   }
   MsgWelcome w = {}; fillHdr(w.h, M_WELCOME); w.channel = WiFi.channel();
@@ -467,7 +482,7 @@ void handleHello(const RxItem& it) {
   sendSigned(i, &w, sizeof(w));
   if (added) activity("Paired new " + String(typeName(devType)) + " '" + String(m.name) + "'", false);
   if (giveKey) { devsSave(); dbg("Issued security key to " + macStr(it.mac)); }
-  dbg("Edge " + macStr(it.mac) + " session started");
+  dbg(relinkNote.length() ? relinkNote : "Edge " + macStr(it.mac) + " session started");
   stateDirty = true;
 }
 
@@ -1164,7 +1179,7 @@ void serialTick() {
 /* ------------------------------ setup / loop ------------------------ */
 void setup() {
   devLock = xSemaphoreCreateMutex(); consoleLock = xSemaphoreCreateMutex(); actLock = xSemaphoreCreateMutex();
-  rxq = xQueueCreate(24, sizeof(RxItem)); txq = xQueueCreate(16, sizeof(TxItem));
+  rxq = xQueueCreate(24, sizeof(RxItem)); txq = xQueueCreate(16, sizeof(TxItem)); txres = xQueueCreate(32, sizeof(TxResult));
   Serial.begin(115200); Serial.setTxTimeoutMs(0);
 
   uint8_t mac[6]; esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -1217,14 +1232,32 @@ void loop() {
   }
   edgeOtaTick();
 
+  // radio delivery results: a missed ACK makes the next keep-alive go out quickly
+  TxResult tr; n = 0;
+  while (n++ < 32 && xQueueReceive(txres, &tr, 0) == pdTRUE) {
+    DevGuard g; int i = findDev(tr.mac); if (i < 0) continue;
+    Dev& d = devs[i]; d.txSent++;
+    if (tr.ok) d.failRun = 0; else { d.txFail++; if (d.failRun < 255) d.failRun++; }
+    d.pingRetry = d.failRun > 0 && d.failRun < 12;              // give up fast retries if it is really gone
+  }
+
+  // the router can move the WiFi channel; edges then have to find the hub again
+  static uint8_t lastCh = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    uint8_t ch = WiFi.channel();
+    if (lastCh && ch != lastCh) dbg("Router moved WiFi from channel " + String(lastCh) + " to " + String(ch) + " - edges will re-link");
+    lastCh = ch;
+  }
+
   // signed keep-alive pings (edges re-link if they stop hearing verified packets)
   static uint32_t lastPingScan = 0;
-  if (millis() - lastPingScan > 500) {
+  if (millis() - lastPingScan > 100) {
     lastPingScan = millis();
     for (int i = 0; i < MAX_DEV; ++i) {
       bool due = false;
       { DevGuard g; Dev& d = devs[i];
-        due = d.used && d.hasKey && d.session && millis() - d.lastPing > PING_MS && !(eota.active && !memcmp(eota.mac, d.mac, 6));
+        due = d.used && d.hasKey && d.session && millis() - d.lastPing > (d.pingRetry ? 300u : (uint32_t)PING_MS) &&
+              !(eota.active && !memcmp(eota.mac, d.mac, 6));
         if (due) d.lastPing = millis(); }
       if (due) { MsgPing p = {}; fillHdr(p.h, M_PING); sendSigned(i, &p, sizeof(p)); }
     }
