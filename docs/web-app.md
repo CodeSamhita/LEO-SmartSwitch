@@ -6,6 +6,8 @@ Open **`http://leohub.local`**.
 - Add `?ip` to the address to never switch.
 - On Android, Chrome may block local addresses; use another browser (for example Brave) or allow local-network access.
 
+**Install it as an app (Android Chrome):** Chrome only installs apps from secure addresses. On the phone, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, enter `http://leohub.local,http://192.168.1.115`, set it to **Enabled** and relaunch Chrome. Then open `http://leohub.local` and choose **⋮ → Install app**. It gets the LEO icon and opens full-screen; if the hub can't be reached it shows a short *not reachable* page. Without the flag, **⋮ → Add to home screen → Create shortcut** gives an icon that opens in Chrome.
+
 Every setting has a **?** next to it. Tap it for a short explanation.
 
 **The page stays live:** the hub sends an update at least every 2 seconds. If updates stop (phone asleep, WiFi blip,
