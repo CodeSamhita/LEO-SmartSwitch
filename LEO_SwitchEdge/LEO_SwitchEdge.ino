@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.2.1-sw"
+#define EDGE_FW           "2.3.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -70,10 +70,10 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; };   // hub local time, minutes after midnight (-1 unknown)
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; };   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
-struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; };
+struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -125,6 +125,7 @@ uint32_t nonce = 0, txCtr = 0, rxCtr = 0;
 uint8_t  channel = 1, txSeq = 0;
 uint8_t scanStep = 0;
 int16_t  hubMins = -1; uint32_t hubMinsAt = 0;   // time of day from the hub; keeps running locally if the hub goes away
+uint8_t  hubRoom = 255; uint32_t hubRoomAt = 0;  // room light from the tank's LDR, via the hub (1 lit, 0 dark)
 uint32_t lastState = 0, lastScanStep = 0, lastVerified = 0, linkedSince = 0, identifyUntil = 0, restartAt = 0;
 bool     stateDirty = true;
 bool     otaActive = false; uint32_t otaSize = 0, otaWritten = 0;
@@ -323,7 +324,11 @@ void handlePacket(const RxItem& it) {
   rxCtr = ctr; lastVerified = millis();
 
   if (h->type == M_PING) {
-    if (blen >= sizeof(MsgPing)) { MsgPing p; memcpy(&p, it.data, sizeof(p)); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } }
+    if (blen >= sizeof(LeoHdr) + 2) {
+      MsgPing p = {}; p.room = 255; memcpy(&p, it.data, min(blen, sizeof(p)));
+      if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); }
+      if (blen >= sizeof(MsgPing) && p.room != 255) { hubRoom = p.room; hubRoomAt = millis(); }
+    }
     return;
   }
   if (h->type == M_CMD && blen >= sizeof(MsgCmd)) { MsgCmd c; memcpy(&c, it.data, sizeof(c)); handleCmd(c); return; }
@@ -369,20 +374,25 @@ void linkTick() {
   if (hubKnown && k < 2) { addPeer(hubMac); sendHello(hubMac); }
   else { addPeer(BCAST); sendHello(BCAST); }
 }
-/* Power / status LED: a 60 ms blink at the lowest brightness the LED can show.
+/* Power / status LED: one quick, faint breath (0.8 s up and down), dark the rest of the time.
      green  every 5 s   : on and linked to the hub
      amber  every 2 s   : on, looking for the hub
      blue   every 2 s   : on, never paired with a hub
      cyan   every 0.5 s : receiving a firmware update
-     white  quick blinks: "identify" from the app (deliberately visible)    */
-float daylight() {                                   // 0 = night, 1 = full day; unknown time -> night (dim)
+     white  quick blinks: "identify" from the app (deliberately visible)
+   Peak: 5/255 when the room is lit, 2/255 when dark. Room light comes from the tank's LDR via
+   the hub; without it (no tank / hub away) the clock decides: 07:00-18:00 = day.            */
+float daylight() {                                   // 1 = room lit / day, 0 = dark / night
+  if (hubRoom != 255 && millis() - hubRoomAt < 60000) return hubRoom ? 1 : 0;
   if (hubMins < 0 || millis() - hubMinsAt > 24UL * 3600 * 1000) return 0;
   int m = (hubMins + (int)((millis() - hubMinsAt) / 60000)) % 1440;
-  const int dawnA = 5 * 60 + 30, dawnB = 7 * 60, duskA = 17 * 60 + 30, duskB = 19 * 60;
-  if (m < dawnA || m >= duskB) return 0;
-  if (m < dawnB) return (float)(m - dawnA) / (dawnB - dawnA);
-  if (m < duskA) return 1;
-  return 1 - (float)(m - duskA) / (duskB - duskA);
+  return (m >= 7 * 60 && m < 18 * 60) ? 1 : 0;
+}
+uint8_t breathLevel(uint32_t period, uint8_t peak) { // quick sine breath at the start of each period
+  uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = millis() % period;
+  if (t >= len) return 0;
+  float s = sinf(PI * t / len);
+  return (uint8_t)(s * s * peak + 0.5f);
 }
 void ledTick() {
   static uint32_t last = 0; static uint32_t shown = 0xFFFFFFFF;
@@ -391,15 +401,13 @@ void ledTick() {
   if (millis() < identifyUntil) {
     c = ((millis() / 150) % 2) ? pix.Color(90, 90, 90) : 0;
   } else {
-    // one very short, barely visible blink; dark the rest of the time
     uint8_t r, g, b; uint32_t period;
     if (otaActive)      { r = 0; g = 1; b = 1; period = 500;  }
     else if (linked)    { r = 0; g = 1; b = 0; period = 5000; }
     else if (hasKey)    { r = 1; g = 1; b = 0; period = 2000; }
     else                { r = 0; g = 0; b = 1; period = 2000; }
-    uint8_t k = daylight() > 0.5f ? 2 : 1;           // 2/255 by day, 1/255 at night: the LED's lowest steps
-    bool on = (millis() % period) < 60;              // 60 ms flash
-    c = on ? pix.Color(r * k, g * k, b * k) : 0;
+    uint8_t k = breathLevel(period, daylight() > 0.5f ? 5 : 2);
+    c = pix.Color(r * k, g * k, b * k);
   }
   if (c != shown) { shown = c; pix.setPixelColor(0, c); pix.show(); }   // only talk to the LED when it changes
 }

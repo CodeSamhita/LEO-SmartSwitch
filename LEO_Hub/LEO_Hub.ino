@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.2.1"
+#define HUB_FW            "1.3.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -76,10 +76,10 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; };   // hub local time, minutes after midnight (-1 unknown)
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; };   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
-struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; };
+struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -124,6 +124,7 @@ struct Dev {
   float    levelPct, distCm;
   uint8_t  leds, tstate, sensorOk;
   char     stateTxt[24];
+  uint16_t ldr;                           // room light from the tank's LDR, 0xFFFF unknown
 };
 Dev devs[MAX_DEV];
 SemaphoreHandle_t devLock;
@@ -149,6 +150,10 @@ volatile bool netUpPending = false, netDownPending = false;
 bool     staUp = false, apUp = false;
 // onboard RGB LED: GPIO48 on most ESP32-S3 DevKitC boards, GPIO38 on DevKitC v1.1 - drive both (nothing else uses them)
 Adafruit_NeoPixel ledA(1, 48, NEO_GRB + NEO_KHZ800), ledB(1, 38, NEO_GRB + NEO_KHZ800);
+// room light for every device, taken from the tank's LDR: 1 lit, 0 dark, 255 unknown (no tank online -> clock)
+uint8_t roomLight = 255;
+#define ROOM_LIT_ON   120                 // same dead band as the tank: lit above 120, dark again below 80
+#define ROOM_LIT_OFF  80
 uint32_t staDownSince = 0, lastStaTry = 0, lastPush = 0, restartAt = 0;
 bool     stateDirty = true;
 uint8_t  txSeq = 0;
@@ -535,10 +540,11 @@ void handlePacket(const RxItem& it) {
     d.n = m.n > 4 ? 4 : m.n; copyStr(d.fw, sizeof(d.fw), m.fw);
     for (int r = 0; r < 4; ++r) { copyStr(d.rname[r], sizeof(d.rname[r]), m.rname[r]); d.watts[r] = m.watts[r]; d.gpio[r] = m.gpio[r]; }
     d.infoKnown = true; stateDirty = true;
-  } else if (h->type == M_TANK_STATE && blen >= sizeof(MsgTankState)) {
-    MsgTankState m; memcpy(&m, it.data, sizeof(m));
+  } else if (h->type == M_TANK_STATE && blen >= sizeof(MsgTankState) - 2) {   // tank 1.0 has no 'ldr'
+    MsgTankState m = {}; memcpy(&m, it.data, min(blen, sizeof(m)));
     DevGuard g; Dev& d = devs[i];
-    if ((int)d.levelPct != (int)m.levelPct || d.leds != m.leds || d.sensorOk != m.sensorOk) stateDirty = true;
+    d.ldr = blen >= sizeof(MsgTankState) ? m.ldr : 0xFFFF;
+    if ((int)d.levelPct != (int)m.levelPct || d.leds != m.leds || d.sensorOk != m.sensorOk || strncmp(d.stateTxt, m.stateTxt, sizeof(d.stateTxt))) stateDirty = true;
     d.levelPct = m.levelPct; d.distCm = m.distCm; d.leds = m.leds; d.tstate = m.state;
     d.sensorOk = m.sensorOk; d.uptime = m.uptime; copyStr(d.stateTxt, sizeof(d.stateTxt), m.stateTxt);
   } else if (h->type == M_OTA_ACK && blen >= sizeof(MsgOtaAck)) {
@@ -592,6 +598,7 @@ String stateJson() {
   JsonDocument d;
   JsonObject h = d["hub"].to<JsonObject>();
   h["name"] = hubName; h["id"] = hubId; h["fw"] = HUB_FW;
+  h["room"] = roomLight == 1 ? "bright" : roomLight == 0 ? "dark" : "unknown";
   h["wifi"] = (WiFi.status() == WL_CONNECTED); h["ip"] = WiFi.localIP().toString();
   h["ap"] = apUp ? apSsid() : String("");
   h["passwordSet"] = pwHash.length() > 0;
@@ -620,6 +627,7 @@ String stateJson() {
         JsonObject t = o["tank"].to<JsonObject>();
         t["level"] = v.levelPct; t["dist"] = v.distCm; t["leds"] = v.leds;
         t["sensorOk"] = (bool)v.sensorOk; t["stateTxt"] = v.stateTxt;
+        if (v.ldr != 0xFFFF) t["ldr"] = v.ldr;
       }
     } }
   if (eota.active || eota.msg.length()) {
@@ -858,7 +866,7 @@ static const char INDEX_HTML[] PROGMEM =
   "      return `<div class=\"card ${d.online?'':'offline'}\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span></div>\n"
   "        <div class=\"tank\"><div class=\"tankbar\">${segs}</div><div><div class=\"big\">${t.sensorOk===false?'—':Math.round(t.level||0)}<small>%</small></div>\n"
   "        <div class=\"meta\" style=\"margin-top:6px\">${t.sensorOk===false?'<span class=\"err\">Sensor error</span>':('Water distance '+(t.dist||0).toFixed(1)+' cm')}</div>\n"
-  "        <div class=\"meta\">${esc(t.stateTxt||'')}</div></div></div>\n"
+  "        <div class=\"meta\">${esc(t.stateTxt||'')}</div>${t.ldr!==undefined?`<div class=\"meta\">Room light: ${esc(S.hub.room||'')} (${t.ldr})</div>`:''}</div></div>\n"
   "        <div class=\"meta\" style=\"margin-top:8px\">${meta}</div></div>`}\n"
   "    return `<div class=\"card\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span></div><div class=\"meta\">Unknown device type</div></div>`}).join('');\n"
   "}\n"
@@ -1226,12 +1234,12 @@ void setup() {
   esp_task_wdt_add(NULL);
 }
 
-/* Status LED: one very short, barely visible blink; dark the rest of the time.
+/* Status LED: one quick, faint breath (0.8 s); dark the rest of the time.
      green  every 5 s : on WiFi, all good
      cyan   every 2 s : pairing window open ("Allow new devices")
      amber  every 2 s : WiFi lost / still connecting
      blue   every 2 s : emergency hotspot is on
-   Brightness: 2/255 by day, 1/255 at night (the lowest the LED can show). */
+   Peak 5/255 when the room is lit, 2/255 when dark (room light from the tank's LDR, else the clock). */
 void hubLedTick() {
   static uint32_t last = 0, shown = 0xFFFFFFFF; if (millis() - last < 20) return; last = millis();
   uint8_t r, g, b; uint32_t period;
@@ -1239,11 +1247,12 @@ void hubLedTick() {
   else if (!staUp)                   { r = 1; g = 1; b = 0; period = 2000; }
   else if (millis() < pairingUntil)  { r = 0; g = 1; b = 1; period = 2000; }
   else                               { r = 0; g = 1; b = 0; period = 5000; }
-  bool day = false;
-  if (timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); day = tm.tm_hour >= 7 && tm.tm_hour < 18; }
-  uint8_t k = day ? 2 : 1;
-  bool on = (millis() % period) < 60;                       // 60 ms flash
-  uint32_t c = on ? ledA.Color(r * k, g * k, b * k) : 0;
+  bool day = roomLight == 1;                                // room light from the tank's LDR ...
+  if (roomLight == 255 && timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); day = tm.tm_hour >= 7 && tm.tm_hour < 18; }   // ... else the clock
+  uint32_t len = 800, t = millis() % period;                // quick breath: 0.8 s up and down, then dark
+  float s = t < len ? sinf(PI * t / len) : 0;
+  uint8_t k = (uint8_t)(s * s * (day ? 5 : 2) + 0.5f);      // peak 5/255 in a lit room, 2/255 dark
+  uint32_t c = ledA.Color(r * k, g * k, b * k);
   if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
 }
 
@@ -1291,7 +1300,7 @@ void loop() {
               !(eota.active && !memcmp(eota.mac, d.mac, 6));
         if (due) d.lastPing = millis(); }
       if (due) {
-        MsgPing p = {}; fillHdr(p.h, M_PING); p.mins = -1;
+        MsgPing p = {}; fillHdr(p.h, M_PING); p.mins = -1; p.room = roomLight;
         if (timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); p.mins = tm.tm_hour * 60 + tm.tm_min; }
         sendSigned(i, &p, sizeof(p));
       }
@@ -1302,8 +1311,16 @@ void loop() {
   static uint32_t lastScan = 0;
   if (millis() - lastScan > 1000) {
     lastScan = millis();
-    static uint32_t prevOnline = 0; uint32_t mask = 0;
-    { DevGuard g; for (int i = 0; i < MAX_DEV; ++i) if (devs[i].used && devs[i].lastSeen && millis() - devs[i].lastSeen < OFFLINE_MS) mask |= (1u << i); }
+    static uint32_t prevOnline = 0; uint32_t mask = 0; int ldr = -1;
+    { DevGuard g; for (int i = 0; i < MAX_DEV; ++i) if (devs[i].used && devs[i].lastSeen && millis() - devs[i].lastSeen < OFFLINE_MS) {
+        mask |= (1u << i);
+        if (devs[i].type == DEV_TANK && devs[i].ldr != 0xFFFF) ldr = max(ldr, (int)devs[i].ldr);
+      } }
+    uint8_t room = ldr < 0 ? 255 : (roomLight == 1 ? (ldr > ROOM_LIT_OFF ? 1 : 0) : (ldr > ROOM_LIT_ON ? 1 : 0));
+    if (room != roomLight) {
+      dbg(String("Room light: ") + (room == 1 ? "bright" : room == 0 ? "dark" : "unknown (no tank) - using the clock") + (ldr >= 0 ? " (LDR " + String(ldr) + ")" : ""));
+      roomLight = room; stateDirty = true;
+    }
     if (mask != prevOnline) { prevOnline = mask; stateDirty = true; }
     static bool prevLock = false; bool lk = lockActive();
     if (lk != prevLock) { prevLock = lk; stateDirty = true; if (lockSched && !lockManual) activity(String("Night lock ") + (lk ? "started" : "ended") + " (schedule)", false); }

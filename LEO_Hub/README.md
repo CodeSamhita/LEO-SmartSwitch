@@ -39,8 +39,8 @@ Libraries: ESPAsyncWebServer + AsyncTCP (ESP32Async), ArduinoJson 7, Adafruit Ne
   The hub logs the change when it hears the switch again. Unwired pins are pulled down and
   never trigger. For modules that pull LOW when touched, set `TOUCH_ACTIVE_HIGH 0`.
   Night lock only blocks the app, not a person at the switch.
-- **Status LED** (replaces the power LED): one 60 ms blink at the LED's lowest brightness
-  (2/255 by day, 1/255 at night, using the time from the hub), dark the rest of the time.
+- **Status LED** (replaces the power LED): one quick, faint breath (0.8 s), dark the rest of the time.
+  The peak is 5/255 when the room is lit and 2/255 when it's dark.
   - Green every 5 s: linked.
   - Amber every 2 s: looking for the hub.
   - Blue every 2 s: never paired.
@@ -69,8 +69,16 @@ tank_v9 / AquaNode v2.12:
 - **No sensor:** with no ultrasonic sensor, or no echo, it reports *Sensor not connected*: level LEDs off,
   no alarms, red status blink.
 
-## Hub status LED (1.2.1)
-The onboard RGB LED (GPIO 48, or 38 on DevKitC v1.1) gives the same faint 60 ms blink:
+## Room light: one sensor for the whole room (hub 1.3.0)
+The tank's LDR is the room's light sensor. The tank sends its reading to the hub, which decides
+**bright** or **dark** (bright above 120, dark again below 80, so it doesn't flicker at dusk). The hub
+passes that to every device in its keep-alive, and every status LED uses it for its brightness.
+If no tank is online, the clock decides instead (07:00–18:00 = day).
+The tank's buzzer stays quiet when the room is dark **or** between 22:00 and 06:00.
+The tank card in the web app shows *Room light: bright/dark (reading)*.
+
+## Hub status LED
+The onboard RGB LED (GPIO 48, or 38 on DevKitC v1.1) gives the same quick faint breath:
 - Green every 5 s: on WiFi.
 - Cyan every 2 s: pairing open.
 - Amber every 2 s: WiFi lost or connecting.

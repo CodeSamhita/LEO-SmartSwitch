@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.0.1-tank"
+#define EDGE_FW           "1.1.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -60,7 +60,10 @@
 #define REARM_LOW_PCT     15
 #define REARM_HIGH_PCT    90
 #define ALERT_ROUNDS      10
-#define DAYLIGHT_LDR      100         // buzzer only above this (room lit)
+#define LIT_ON_LDR        120         // room counts as lit above this ...
+#define LIT_OFF_LDR       80          // ... and as dark again below this (no flicker at dusk)
+#define QUIET_FROM_H      22          // buzzer also quiet 22:00-06:00 (clock from the hub)
+#define QUIET_TO_H        6
 
 /* ===================== LEO EDGE PROTOCOL v2 ==========================
    Keep IDENTICAL in the hub and every edge sketch. Packed, little-endian.
@@ -78,10 +81,10 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; };   // hub local time, minutes after midnight (-1 unknown)
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; };   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
-struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; };
+struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -157,7 +160,14 @@ void dbg(const String& m) {           // never blocks (USB host present but not 
 void copyStr(char* dst, size_t n, const char* src) { strncpy(dst, src, n - 1); dst[n - 1] = 0; }
 void fillHdr(LeoHdr& h, uint8_t type) { h.magic = LEO_MAGIC; h.proto = LEO_PROTO; h.type = type; h.dev = DEV_TANK; h.seq = ++txSeq; }
 String macStr(const uint8_t* m) { char b[18]; snprintf(b, sizeof(b), "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]); return String(b); }
-bool roomLit() { return ldrRaw > DAYLIGHT_LDR; }
+bool litState = true;
+bool roomLit() { return litState; }
+int  clockMins() {                                       // local time from the hub, -1 if unknown
+  if (hubMins < 0 || millis() - hubMinsAt > 24UL * 3600 * 1000) return -1;
+  return (hubMins + (int)((millis() - hubMinsAt) / 60000)) % 1440;
+}
+bool quietHours() { int m = clockMins(); return m >= 0 && (m >= QUIET_FROM_H * 60 || m < QUIET_TO_H * 60); }
+bool buzzerAllowed() { return roomLit() && !quietHours(); }
 
 /* ------------------------------ sensors ---------------------------- */
 float pingOnceCm() {                    // one HC-SR04 ping; <0 = no echo
@@ -201,6 +211,8 @@ void ldrTick() {
   static uint32_t last = 0; if (millis() - last < 500) return; last = millis();
   long s = 0; for (int i = 0; i < 16; ++i) s += analogRead(LDR_PIN);
   ldrRaw = s / 16;
+  bool lit = litState ? ldrRaw > LIT_OFF_LDR : ldrRaw > LIT_ON_LDR;
+  if (lit != litState) { litState = lit; stateDirty = true; dbg(lit ? "Room is lit" : "Room is dark"); }
 }
 
 /* ------------------------------ alerts ----------------------------- */
@@ -225,7 +237,7 @@ void alertTick() {
   if (millis() - alertPhaseAt < (alertOn ? onMs : offMs)) return;
   alertPhaseAt = millis();
   if (alertOn) { alertOn = false; buzzer(false); if (++alertRound >= ALERT_ROUNDS) stopAlert(); }
-  else { alertOn = true; buzzer(roomLit()); }            // quiet at night; LEDs still flash
+  else { alertOn = true; buzzer(buzzerAllowed()); }      // quiet in a dark room or 22-06; LEDs still flash
 }
 
 /* ------------------------------ button ----------------------------- */
@@ -244,10 +256,12 @@ void buttonTick() {
 
 /* ------------------------------ LEDs ------------------------------- */
 const uint8_t GRAD[LEVEL_LEDS][3] = { {255,0,0}, {223,0,32}, {159,0,96}, {128,0,128}, {64,0,191}, {32,0,223}, {0,0,255} };
-float daylight() {                                       // 0 night .. 1 day, from the hub's clock
-  if (hubMins < 0 || millis() - hubMinsAt > 24UL * 3600 * 1000) return 0;
-  int m = (hubMins + (int)((millis() - hubMinsAt) / 60000)) % 1440;
-  return (m >= 7 * 60 && m < 18 * 60) ? 1 : 0;
+float daylight() { return roomLit() ? 1 : 0; }           // the tank's own LDR is the room's light sensor
+uint8_t breathLevel(uint32_t period, uint8_t peak) {     // quick sine breath at the start of each period
+  uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = millis() % period;
+  if (t >= len) return 0;
+  float s = sinf(PI * t / len);
+  return (uint8_t)(s * s * peak + 0.5f);
 }
 void ledTick() {
   static uint32_t last = 0; if (millis() - last < 30) return; last = millis();
@@ -265,14 +279,14 @@ void ledTick() {
   } else if (sensorOk) {
     for (int i = 0; i < levelLeds && i < LEVEL_LEDS; ++i) c[i] = scaled(GRAD[i][0], GRAD[i][1], GRAD[i][2], br);
   }
-  // LED 8: faint status blink (60 ms), same scheme as the LEO switch; amber blink also = sensor fault
+  // LED 8: faint quick breath, same scheme as the LEO switch; red = sensor fault
   uint8_t r, g, b; uint32_t period;
   if (otaActive)        { r = 0; g = 1; b = 1; period = 500;  }
   else if (!linked)     { r = hasKey ? 1 : 0; g = hasKey ? 1 : 0; b = hasKey ? 0 : 1; period = 2000; }
   else if (!sensorOk)   { r = 1; g = 0; b = 0; period = 2000; }
   else                  { r = 0; g = 1; b = 0; period = 5000; }
-  uint8_t k = daylight() > 0.5f ? 2 : 1;
-  if (millis() >= identifyUntil && (millis() % period) < 60) c[STATUS_LED] = strip.Color(r * k, g * k, b * k);
+  uint8_t k = breathLevel(period, daylight() > 0.5f ? 5 : 2);   // quick faint breath, like every LEO device
+  if (millis() >= identifyUntil && k) c[STATUS_LED] = strip.Color(r * k, g * k, b * k);
 
   static uint32_t shown[NUM_LEDS]; static bool first = true; bool dirty = first; first = false;
   for (int i = 0; i < NUM_LEDS; ++i) if (shown[i] != c[i]) { shown[i] = c[i]; strip.setPixelColor(i, c[i]); dirty = true; }
@@ -325,6 +339,7 @@ void sendState() {
   m.flags = (alertNow ? 1 : 0) | (silenced ? 2 : 0) | (roomLit() ? 0 : 4);
   m.uptime = millis() / 1000;
   copyStr(m.stateTxt, sizeof(m.stateTxt), stateText());
+  m.ldr = (uint16_t)ldrRaw;
   sendHub(&m, sizeof(m));
   lastState = millis(); stateDirty = false;
 }
@@ -390,7 +405,7 @@ void handlePacket(const RxItem& it) {
   rxCtr = ctr; lastVerified = millis();
 
   if (h->type == M_PING) {
-    if (blen >= sizeof(MsgPing)) { MsgPing p; memcpy(&p, it.data, sizeof(p)); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } }
+    if (blen >= sizeof(LeoHdr) + 2) { MsgPing p = {}; memcpy(&p, it.data, min(blen, sizeof(p))); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } }
     return;
   }
   if (h->type == M_CMD && blen >= sizeof(MsgCmd)) { MsgCmd c; memcpy(&c, it.data, sizeof(c)); handleCmd(c); return; }
