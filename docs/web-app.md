@@ -8,7 +8,14 @@ Open **`http://leohub.local`**.
 
 **Install it as an app (Android Chrome):** Chrome only installs apps from secure addresses. On the phone, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, enter `http://leohub.local,http://192.168.1.115`, set it to **Enabled** and relaunch Chrome. Then open `http://leohub.local` and choose **⋮ → Install app**. It gets the LEO icon and opens full-screen; if the hub can't be reached it shows a short *not reachable* page. Without the flag, **⋮ → Add to home screen → Create shortcut** gives an icon that opens in Chrome.
 
-Every setting has a **?** next to it. Tap it for a short explanation.
+The labels are kept short and there are no help bubbles. Less-used settings sit under **＋ More options** style links.
+
+**Feedback and motion:** every button that changes something spins while it is sent, then flashes **green** (done) or
+shakes **red** (failed). A slider's value turns green once it is saved. Pages and tabs fade in, toggles slide, and the
+tank bar changes colour smoothly. If the phone asks for reduced motion, animations are off.
+
+**Refresh keeps your place:** the address remembers the page and tab (for example `#tank/<mac>/display`), so a refresh
+brings you back there. Tap **LEO Home Hub** or the logo to go to Home.
 
 **The page stays live:** the hub sends an update at least every 2 seconds. If updates stop (phone asleep, WiFi blip,
 hub restarting), the header shows **Reconnecting…** and the page reconnects by itself. It also reconnects the
@@ -22,19 +29,27 @@ Quick controls for every device. Tap a card (not its buttons) to open the device
 
 ## Switch page
 Tabs: **Overview** (relays, power chart) · **Relays** (names, watts, in use) · **Setup** (touch pads, name, restart, update, remove, Advanced).
-- **Controls:** every relay (and how long it has been on), All on / All off, signal, uptime and firmware.
-- **Power use:** a chart with **1 h / 6 h / 24 h / Yesterday / 7 days**.
-  - **Points:** each point is the average power of 5 minutes (24 h) or of an hour (Yesterday, 7 days).
-  - **Scale:** always 0 to the total watts of the relays in use, on every range.
-  - **The last point** is the **live** power right now.
-  - **Footer:** *Now … W*, the estimated energy (kWh) and the peak.
+- **Controls:** every relay (with its colour dot and how long it has been on), All on / All off, signal, uptime and firmware.
+- **Timers (⏱ next to each relay):** *off in* 15 m / 30 m / 1 h / 2 h / 4 h, or *off at* a time. If the relay is off, the same
+  buttons mean *on for*. The row shows *⏱ off in …*. Cancel removes it. Timers are kept by the hub (a hub restart cancels them)
+  and each one is recorded in Activity.
+- **Power use:** a smooth chart with **1H / 6H / 24H / Yday / 7D**. The big number is the live power; tap or hover the chart and
+  it shows the value and time at that point. Peak, average and energy are shown beside it. The scale is always 0 to the total
+  watts of the relays in use.
+- **By light · cost:** stacked bars coloured per relay (hourly for 1H–Yday, daily for 7D), the estimated cost in ₹ for the
+  period, a *per month* projection, and for each light: time on, kWh, ₹ and its share. **＋ Price per unit** sets a day and a
+  night price (default ₹6.16 = BESCOM home rate ₹5.80 + 36 p surcharge; household tariffs have no day/night rate, so both are
+  the same). This is an **estimate** from each light's watts and on-time, not a meter reading.
 - **Relays:** name and watts per relay. **In use**: switch it off for a relay with nothing connected.
 - **Touch buttons:** turn the touch pads on GPIO 4–7 on or off.
 - **Device:** name, Identify, Restart, Update firmware…, **Remove device…**
 - **Advanced:** chip temperature, free memory, storage, firmware size, last restart cause, ESP-IDF version, and **Factory reset this device**.
 
 ## Tank page
-Tabs: **Overview** (live view, actions, chart) · **Alarms** (rules, buzzer, quiet hours) · **Display** (colours, highlight, LEDs, daytime display) · **Setup** (tank size, status labels, name, restart, update, remove, Advanced).
+Tabs: **Overview** (live view, actions, chart) · **Alarms** (rules, buzzer) · **LEDs** (colours, level, brightness) · **Setup** (tank size, status labels, name, restart, update, remove, Advanced).
+- **Buzzer → Sound allowed** (tank 1.10+): *Always*, *By time* (not in the night hours), *By room light* (only when the room is lit), or *By time and room light* (default).
+- **LEDs → Brightness:** ☀ *Day · at least* (1–60 / 255) and ☾ *Night · at most* (0–255; 0 = level LEDs off at night).
+  **＋ Follow room light** holds the sensor range (LEDs off at / full brightness at).
 The alarm rules are a short list sorted by level, highest first (switched-off rules last), for example *Rises to 95 % · Long beeps ×8 · Blue*; tap a rule to edit it.
 - **Live view:** level, distance, status, room light, signal and firmware.
 - **Actions:** **Silence alarm**, **Beep** (a short test beep) and **Identify**.
@@ -59,9 +74,17 @@ The alarm rules are a short list sorted by level, highest first (switched-off ru
 - **LED display:**
   - **Level colours:** Red → Blue, Red → Green, **Spectrum** (red → orange → yellow → green → cyan → blue, spread over the LEDs in use), or **Custom**. Custom gives one colour picker per LED, listed **top LED first**,
     like the real strip.
-  - **Current level highlight** (slider 0–50 %): how much the top lit LED stands out. Half makes it brighter, half makes the LEDs below dimmer.
+  - **Fixed-range settings are sliders** that save when you let go. Next to each % the app shows the real value: brightness out of 255, light sensor out of 4095, water in cm.
+  - **Current level highlight** (slider 0–100 %): how much the top lit LED stands out. Half makes it brighter, half makes the LEDs below dimmer.
+    Under the slider: the actual brightness of the top LED and of the LEDs below (out of 255), right now and in full daylight. At 100 % the top LED is 1.5× brighter and the others are at half.
   - **LEDs used to show the level:** 1–8, counted from the bottom.
-  - **Daytime minimum brightness:** during the global daytime hours the level LEDs never go fully dark; they stay at least this bright.
+  - **Daytime minimum brightness** (1–60 of 255): during the global daytime hours the level LEDs never go fully dark; they stay at least this bright.
+- **Light sensor** (tank 1.9+): the reading now (0–4095), the lowest and highest readings of the last 24 h, and two calibration sliders.
+  - **Dark room reading:** at or below this the level LEDs are off.
+  - **Full daylight reading:** at or above this they are at full brightness (255). In between they follow the light.
+  - **Now is dark / Now is full daylight** copy the current reading.
+- **Advanced → LED simulation** (tank 1.9+): sliders for water level and light sensor, plus *Daytime hours* and *Sensor fault* switches. **Start (3 min)** makes the real strip show those values; a preview in the app shows the same. Nothing is saved, no alarm sounds, and the app keeps showing the real level. **Stop** ends it early.
+- **Alarm rules** show the level in cm of water next to the %, and the overview shows the water depth.
 - **After a restart** (power cut or update), a rule does not sound for a level the tank is already at. It fires only when the level actually rises or drops into it.
 - **Sensor problem:** when the ultrasonic sensor fails, all level LEDs on the tank **blink yellow rapidly**.
 - **While a device is updating,** its page says so. Settings and controls work again once it has restarted.
@@ -81,10 +104,11 @@ with the date and time. **Clear log** deletes it.
 
 ## Hub
 - **Home settings** (global — apply to every device; each device keeps the last values it received):
-  - **Quiet hours:** no sounds from any device.
-  - **Daytime hours:** displays may stay on dimly; also the day/night fallback when no room light reading is available.
-  - **Status light brightness:** in a bright room and in a dark room (1–40).
-  - **Room light thresholds:** bright above / dark below (the tank's light sensor reading; the current reading is shown).
+  - **☀ Day:** the daytime hours and the status light brightness (0–255) in a bright room.
+  - **☾ Night:** the night hours, the status light brightness in a dark room, and **Mute sounds** (no sounds during the night hours).
+  - **◉ Status light:** Breath, Blink, Double blink, Steady or Off, every 1, 2, 2.5, 5 or 10 s, and the colour when all is well. A live preview dot shows the pattern. Warnings keep their own colours (amber = looking for the hub, blue = not paired / hotspot, cyan = updating or pairing, red = sensor fault). All devices stay in step.
+  - **◐ Room light:** one **Dark below** slider on a meter that shows the current reading. The "bright again" point is set automatically a little higher, so the two can never be set the wrong way round.
+  - **Reset to defaults** restores all of the above.
   Device pages show these read-only, with a link here. Everything that depends on a device's hardware stays on that device's page.
 - **Night lock:** lock now, or every night. While it is active, ON commands are refused and recorded; OFF always works.
 - **Security:**

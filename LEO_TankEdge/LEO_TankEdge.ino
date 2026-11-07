@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.8.0-tank"
+#define EDGE_FW           "1.10.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -77,11 +77,12 @@ struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
 struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat;
-                                              uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff; };   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+                                              uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff;
+                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
-struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; uint8_t highlight; uint8_t gain[8]; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
+struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; uint8_t highlight; uint8_t gain[8]; uint16_t ldrMin; uint16_t ldrMax; uint8_t buzzMode; uint8_t nightMax; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
 struct __attribute__((packed)) MsgTankRules { LeoHdr h; uint8_t count; uint8_t r[6][6]; };   // alarm rules: on, level %, dir (0 rises to, 1 drops to), pattern, repeats, colour
 struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
@@ -138,9 +139,17 @@ uint8_t custom[8][3] = { {255,0,0}, {218,0,36}, {182,0,73}, {146,0,109}, {109,0,
 uint8_t ledCount = 7;                                 // LEDs used for the level, 1..8 ("leds")
 uint8_t showFrom = 7, showTo = 22;                    // daytime hours: level LEDs never go fully dark ("sf" / "st"; from == to -> off)
 uint8_t minBright = 6;                                // ... at least this bright (1..60, "mb")
-uint8_t highlight = 10;                               // current-level LED is this % brighter than the ones below (0..50, "hl")
+uint8_t highlight = 10;                               // current-level LED is this % brighter than the ones below (0..100, "hl")
 uint8_t gain[8] = { 100, 100, 100, 100, 100, 100, 100, 100 };   // colour matching: each level LED's max brightness % ("gain")
 uint32_t showAllUntil = 0;                            // colour-matching test: light every level LED until then
+uint8_t  buzzMode = 3;                                // when the buzzer may sound: 0 always, 1 outside quiet hours, 2 when the room is lit, 3 both ("bzm")
+uint8_t  nightMax = 255;                              // outside the daytime hours the level LEDs are at most this bright ("nmx")
+uint16_t ldrMin = 10, ldrMax = 4000;                 // light sensor calibration: dark room reading -> brightness 1, full daylight -> 255 ("lmn" / "lmx")
+// global status light look (from the hub): style 0 breath, 1 blink, 2 double blink, 3 steady, 4 off; period when all is well; colour when all is well
+uint8_t  ledStyle = 0; uint16_t ledPeriod = 5000; uint8_t okCol[3] = { 0, 255, 0 };
+// simulation from the web app (Advanced): drives the real strip with made-up values for a while; nothing is saved, no alarms
+uint32_t simUntil = 0; float simLevel = 50; int simLdr = 2000; bool simDay = true, simFault = false;
+bool simActive() { return simUntil && (int32_t)(simUntil - millis()) > 0; }
 
 QueueHandle_t rxq;
 Preferences prefs;
@@ -211,7 +220,11 @@ bool inShowHours() {                                     // daytime window for t
   int a = showFrom * 60, b = showTo * 60;
   return a < b ? (m >= a && m < b) : (m >= a || m < b);
 }
-bool buzzerAllowed() { return buzzerOn && roomLit() && !quietHours(); }
+bool buzzerAllowed() {
+  if (!buzzerOn) return false;
+  bool timeOk = !quietHours(), lightOk = roomLit();
+  switch (buzzMode) { case 0: return true; case 1: return timeOk; case 2: return lightOk; default: return timeOk && lightOk; }
+}
 
 /* ------------------------------ sensors ---------------------------- */
 float pingOnceCm() {                    // one HC-SR04 ping; <0 = no echo
@@ -373,11 +386,31 @@ uint8_t breathLevel(uint32_t period, uint8_t peak) {     // quick sine breath at
   float s = sinf(PI * t / len);
   return (uint8_t)(s * s * peak + 0.5f);
 }
+uint8_t statusLevel(uint32_t period, uint8_t peak) {     // the global status light style, on the hub's beat
+  uint32_t t = beatMillis() % period;
+  switch (ledStyle) {
+    case 1: return t < 120 ? peak : 0;                                      // blink
+    case 2: return (t < 100 || (t >= 250 && t < 350)) ? peak : 0;           // double blink
+    case 3: return peak;                                                    // steady
+    case 4: return 0;                                                       // off
+    default: return breathLevel(period, peak);                              // breath
+  }
+}
+uint8_t chan(uint8_t col, uint8_t k) { if (!col || !k) return 0; return max(1, (col * k + 127) / 255); }   // colour channel at brightness k
+int ldrBrightness(int ldr) {                             // light sensor -> level LED brightness with the calibration (dark room = off)
+  int br = map(ldr, ldrMin, ldrMax, 1, 255); br = constrain(br, 0, 255); return br < 3 ? 0 : br;
+}
 void ledTick() {
   static uint32_t last = 0; if (millis() - last < 30) return; last = millis();
   // level brightness follows the room, like the original: dark room -> level LEDs off
-  int br = map(ldrRaw, 10, 4000, 1, 255); br = constrain(br, 0, 255); if (br < 3) br = 0;
-  if (inShowHours() && br < minBright) br = minBright;                 // daytime: always show the level, dimly
+  const bool sim = simActive();
+  const int ldrNow = sim ? simLdr : ldrRaw;
+  const bool okNow = sim ? !simFault : sensorOk;
+  const int lvLeds = sim ? (int)roundf(simLevel * ledCount / 100.0f) : levelLeds;
+  int br = ldrBrightness(ldrNow);
+  const bool dayNow = sim ? simDay : inShowHours();
+  if (dayNow && br < minBright) br = minBright;          // daytime: always show the level, dimly
+  if (!dayNow && br > nightMax) br = nightMax;           // night: never brighter than this
   uint32_t c[NUM_LEDS]; for (int i = 0; i < NUM_LEDS; ++i) c[i] = 0;
   auto scaled = [&](uint8_t r, uint8_t g, uint8_t b, int k) { return strip.Color(r * k / 255, g * k / 255, b * k / 255); };
 
@@ -387,12 +420,13 @@ void ledTick() {
     bool on = (millis() / 150) % 2; for (int i = 0; i < NUM_LEDS; ++i) c[i] = on ? strip.Color(60, 60, 60) : 0;
   } else if (millis() < btnFeedbackUntil) {
     for (int i = 0; i < ledCount; ++i) c[i] = scaled(128, 0, 128, max(br, 20));     // purple = button seen
-  } else if (alertNow && alertOn) {
+  } else if (alertNow && alertOn && !sim) {
     const uint8_t* fc = FLASH[alertR.color < 6 ? alertR.color : 2];        // the rule's flash colour (none = dark)
     for (int i = 0; i < ledCount; ++i) c[i] = scaled(fc[0], fc[1], fc[2], max(br, 20));
   } else if (millis() < showAllUntil) {                  // colour matching: every level LED on, with its own brightness
     for (int i = 0; i < ledCount; ++i) { uint8_t r, g, b; gradColor(i, r, g, b); c[i] = scaled(r * gain[i] / 100, g * gain[i] / 100, b * gain[i] / 100, max(br, 30)); }
-  } else if (sensorOk) {
+  } else if (okNow) {
+    const int levelLeds = lvLeds;
     for (int i = 0; i < levelLeds && i < ledCount; ++i) {
       uint8_t r, g, b; gradColor(i, r, g, b);
       r = r * gain[i] / 100; g = g * gain[i] / 100; b = b * gain[i] / 100;              // colour matching
@@ -404,7 +438,7 @@ void ledTick() {
       }
       c[i] = scaled(r, g, b, k);
     }
-  } else if (millis() > 8000) {                          // ultrasonic sensor problem: all level LEDs blink yellow, rapidly
+  } else if (sim || millis() > 8000) {                   // ultrasonic sensor problem: all level LEDs blink yellow, rapidly
     bool on = (millis() / 150) % 2;
     for (int i = 0; i < ledCount; ++i) c[i] = on ? scaled(255, 170, 0, max(br, (int)minBright)) : 0;
   }
@@ -412,10 +446,13 @@ void ledTick() {
   uint8_t r, g, b; uint32_t period;
   if (otaActive)        { r = 0; g = 1; b = 1; period = 500;  }
   else if (!linked)     { r = hasKey ? 1 : 0; g = hasKey ? 1 : 0; b = hasKey ? 0 : 1; period = 2000; }
-  else if (!sensorOk)   { r = 1; g = 0; b = 0; period = 2000; }
-  else                  { r = 0; g = 1; b = 0; period = 5000; }
-  uint8_t k = breathLevel(period, daylight() > 0.5f ? ledDay : ledNight);   // quick faint breath, global brightness
-  if (millis() >= identifyUntil && k) c[STATUS_LED] = strip.Color(r * k, g * k, b * k);
+  else if (!okNow)      { r = 1; g = 0; b = 0; period = 2000; }
+  else                  { r = 255; g = 255; b = 255; period = ledPeriod; }    // all well: the global colour and speed
+  uint8_t k = statusLevel(period, daylight() > 0.5f ? ledDay : ledNight);   // global style + brightness
+  if (millis() >= identifyUntil && k) {
+    if (r == 255) c[STATUS_LED] = strip.Color(chan(okCol[0], k), chan(okCol[1], k), chan(okCol[2], k));
+    else c[STATUS_LED] = strip.Color(r * k, g * k, b * k);
+  }
 
   static uint32_t shown[NUM_LEDS]; static bool first = true; bool dirty = first; first = false;
   for (int i = 0; i < NUM_LEDS; ++i) if (shown[i] != c[i]) { shown[i] = c[i]; strip.setPixelColor(i, c[i]); dirty = true; }
@@ -453,6 +490,7 @@ void sendHello(const uint8_t* to) {
 }
 const char* stateText() {
   if (otaActive) return "Updating firmware";
+  if (simActive()) return "Simulation running";
   if (!sensorOk) return tstate == T_BOOT ? "Starting" : "Sensor not connected";
   if (alertNow && alertTest) return "Testing sound";
   if (alertNow) { static char t[24]; snprintf(t, sizeof(t), "Alarm %d: %s %d%%", alertRule + 1, alertR.dir ? "below" : "above", alertR.level); return t; }
@@ -489,14 +527,20 @@ void sendTankRules() {                  // alarm rules for the web app
 void sendTankInfo();
 /* GLOBAL home settings from the hub's keep-alive: quiet hours, daytime hours, room light thresholds, status
    light brightness. Saved only when they change, so the tank keeps following them when the hub is off. */
+bool havePingStyle = false;                          // the last keep-alive carried the status light look
 void applyGlobals(const MsgPing& p) {
   bool ch = false;
   auto set8 = [&](uint8_t& v, uint8_t n, const char* k, uint8_t lo, uint8_t hi) { if (n >= lo && n <= hi && v != n) { v = n; prefs.putUChar(k, n); ch = true; } };
   set8(quietFrom, p.quietFrom, "qf", 0, 23); set8(quietTo, p.quietTo, "qt", 0, 23);
   set8(showFrom, p.dayFrom, "sf", 0, 23);    set8(showTo, p.dayTo, "st", 0, 23);
-  set8(ledDay, p.ledDay, "ld", 1, 40);       set8(ledNight, p.ledNight, "ln", 1, 40);
-  if (p.litOff >= 5 && p.litOn <= 4000 && p.litOff < p.litOn && (p.litOn != litOn || p.litOff != litOff)) {
+  set8(ledDay, p.ledDay, "ld", 0, 255);      set8(ledNight, p.ledNight, "ln", 0, 255);
+  if (p.litOff >= 5 && p.litOn <= 4095 && p.litOff < p.litOn && (p.litOn != litOn || p.litOff != litOff)) {
     litOn = p.litOn; litOff = p.litOff; prefs.putUShort("lon", litOn); prefs.putUShort("loff", litOff); ch = true;
+  }
+  if (havePingStyle) {                                    // status light look (hub 2.1+)
+    set8(ledStyle, p.ledStyle, "ls", 0, 4);
+    if ((p.ledPeriod == 1000 || p.ledPeriod == 2000 || p.ledPeriod == 2500 || p.ledPeriod == 5000 || p.ledPeriod == 10000) && p.ledPeriod != ledPeriod) { ledPeriod = p.ledPeriod; prefs.putUShort("lp2", ledPeriod); ch = true; }
+    if (p.okR != okCol[0] || p.okG != okCol[1] || p.okB != okCol[2]) { okCol[0] = p.okR; okCol[1] = p.okG; okCol[2] = p.okB; prefs.putBytes("okc", okCol, 3); ch = true; }
   }
   if (ch) { dbg("Home settings from the hub updated"); sendTankInfo(); stateDirty = true; }
 }
@@ -505,6 +549,7 @@ void sendTankInfo() {                   // our settings, so the hub web app can 
   m.fullCm = tankFullCm; m.emptyCm = tankEmptyCm; m.fullPct = fullPct; m.lowPct = lowPct;
   m.buzzer = buzzerOn ? 1 : 0; m.quietFrom = quietFrom; m.quietTo = quietTo; m.palette = palette; m.ledCount = ledCount;
   m.showFrom = showFrom; m.showTo = showTo; m.minBright = minBright; memcpy(m.colors, custom, sizeof(m.colors)); m.highlight = highlight; memcpy(m.gain, gain, sizeof(m.gain));
+  m.ldrMin = ldrMin; m.ldrMax = ldrMax; m.buzzMode = buzzMode; m.nightMax = nightMax;
   sendHub(&m, sizeof(m));
 }
 void applySetting(uint8_t idx, float v) {
@@ -525,11 +570,22 @@ void applySetting(uint8_t idx, float v) {
     case 10: if (v >= 0 && v < 24) { showFrom = (uint8_t)v; prefs.putUChar("sf", showFrom); } break;
     case 11: if (v >= 0 && v < 24) { showTo = (uint8_t)v; prefs.putUChar("st", showTo); } break;
     case 12: if (v >= 1 && v <= 60) { minBright = (uint8_t)v; prefs.putUChar("mb", minBright); } break;
-    case 21: if (v >= 0 && v <= 50) { highlight = (uint8_t)v; prefs.putUChar("hl", highlight); } break;
+    case 21: if (v >= 0 && v <= 100) { highlight = (uint8_t)v; prefs.putUChar("hl", highlight); } break;
     case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29:
       if (v >= 10 && v <= 100) { gain[idx - 22] = (uint8_t)v; prefs.putBytes("gain", gain, sizeof(gain)); } break;
     case 30: showAllUntil = v > 0 ? millis() + (uint32_t)constrain(v, 1.0f, 300.0f) * 1000 : 0; break;
+    case 31: if (v >= 0 && v <= ldrMax - 50) { ldrMin = (uint16_t)v; prefs.putUShort("lmn", ldrMin); } break;     // light sensor: dark reading
+    case 32: if (v >= ldrMin + 50 && v <= 4095) { ldrMax = (uint16_t)v; prefs.putUShort("lmx", ldrMax); } break;  // light sensor: daylight reading
+    case 33: if (v >= 0 && v <= 3) { buzzMode = (uint8_t)v; prefs.putUChar("bzm", buzzMode); } break;       // when sounds are allowed
+    case 34: if (v >= 0 && v <= 255) { nightMax = (uint8_t)v; prefs.putUChar("nmx", nightMax); } break;     // night brightness limit
+    // simulation (not saved): any value (re)starts it for 3 minutes; 44 = start for v seconds (0 = stop)
+    case 40: simLevel = constrain(v, 0.0f, 100.0f); if (!simActive()) simUntil = millis() + 180000; break;
+    case 41: simLdr = constrain((int)v, 0, 4095);   if (!simActive()) simUntil = millis() + 180000; break;
+    case 42: simDay = v != 0;                       if (!simActive()) simUntil = millis() + 180000; break;
+    case 43: simFault = v != 0;                     if (!simActive()) simUntil = millis() + 180000; break;
+    case 44: simUntil = v > 0 ? millis() + (uint32_t)constrain(v, 5.0f, 600.0f) * 1000 : 0; break;
   }
+  if (idx >= 40) { stateDirty = true; return; }                     // simulation: nothing to save or report
   if (idx <= 2 && sensorOk) recomputeLevel();
   dbg("Setting " + String(idx) + " = " + String(v, 1));
   sendTankInfo(); stateDirty = true;
@@ -613,7 +669,7 @@ void handlePacket(const RxItem& it) {
   rxCtr = ctr; lastVerified = millis();
 
   if (h->type == M_PING) {
-    if (blen >= sizeof(LeoHdr) + 2) { MsgPing p = {}; memcpy(&p, it.data, min(blen, sizeof(p))); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } if (blen >= offsetof(MsgPing, g)) beatSync(p.beat); if (blen >= sizeof(MsgPing) && p.g == 1) applyGlobals(p); }
+    if (blen >= sizeof(LeoHdr) + 2) { MsgPing p = {}; memcpy(&p, it.data, min(blen, sizeof(p))); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } if (blen >= offsetof(MsgPing, g)) beatSync(p.beat); if (blen >= offsetof(MsgPing, ledStyle) && p.g == 1) { havePingStyle = blen >= sizeof(MsgPing); applyGlobals(p); } }
     return;
   }
   if (h->type == M_CMD && blen >= sizeof(MsgCmd)) { MsgCmd c; memcpy(&c, it.data, sizeof(c)); handleCmd(c); return; }
@@ -716,9 +772,15 @@ void setup() {
   ledCount = prefs.getUChar("leds", 7); if (ledCount < 1 || ledCount > MAX_LEVEL_LEDS) ledCount = 7;
   showFrom = prefs.getUChar("sf", showFrom) % 24; showTo = prefs.getUChar("st", showTo) % 24;
   minBright = prefs.getUChar("mb", minBright); if (minBright < 1 || minBright > 60) minBright = 6;
-  highlight = prefs.getUChar("hl", 10); if (highlight > 50) highlight = 10;
+  ldrMin = prefs.getUShort("lmn", 10); ldrMax = prefs.getUShort("lmx", 4000); if (ldrMax > 4095 || ldrMin + 50 > ldrMax) { ldrMin = 10; ldrMax = 4000; }
+  buzzMode = prefs.getUChar("bzm", 3); if (buzzMode > 3) buzzMode = 3;
+  nightMax = prefs.getUChar("nmx", 255);
+  ledStyle = prefs.getUChar("ls", 0); if (ledStyle > 4) ledStyle = 0;
+  ledPeriod = prefs.getUShort("lp2", 5000); if (!ledPeriod || 10000 % ledPeriod) ledPeriod = 5000;
+  prefs.getBytes("okc", okCol, 3);
+  highlight = prefs.getUChar("hl", 10); if (highlight > 100) highlight = 10;
   litOn = prefs.getUShort("lon", 120); litOff = prefs.getUShort("loff", 80); if (litOff >= litOn) { litOn = 120; litOff = 80; }
-  ledDay = prefs.getUChar("ld", 5); ledNight = prefs.getUChar("ln", 2); if (!ledDay || ledDay > 40) ledDay = 5; if (!ledNight || ledNight > 40) ledNight = 2;
+  ledDay = prefs.getUChar("ld", 5); ledNight = prefs.getUChar("ln", 2);
   if (prefs.getBytesLength("gain") == sizeof(gain)) prefs.getBytes("gain", gain, sizeof(gain));
   for (int i = 0; i < 8; ++i) if (gain[i] < 10 || gain[i] > 100) gain[i] = 100;
   if (prefs.getBytesLength("cols") == sizeof(custom)) prefs.getBytes("cols", custom, sizeof(custom));

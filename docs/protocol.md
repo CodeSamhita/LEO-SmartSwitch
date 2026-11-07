@@ -59,6 +59,20 @@ little-endian structs.
 | 11 | display to (hour) |
 | 12 | minimum brightness |
 | 13–20 | custom colour of LED 1–8 (0xRRGGBB) |
+| 21 | current-level highlight 0–100 % |
+| 22–29 | (colour matching, unused by the app) |
+| 30 | light every level LED for n s |
+| 31 | light sensor dark reading (0–4000) |
+| 32 | light sensor daylight reading (≥ dark + 50, ≤ 4095) |
+| 40 | simulation: water level % |
+| 41 | simulation: light sensor reading |
+| 42 | simulation: daytime hours (0/1) |
+| 43 | simulation: sensor fault (0/1) |
+| 44 | simulation: run for n s (5–600), 0 = stop. 40–43 also start a 3-minute run. Not saved. |
+
+TANK_INFO ends with `ldrMin, ldrMax` (tank 1.9+). PING ends with `ledStyle` (0 breath, 1 blink, 2 double blink,
+3 steady, 4 off), `ledPeriod` (ms: 1000, 2000, 2500, 5000 or 10000, so the beat stays in step) and the all-well
+colour `okR, okG, okB` (hub 2.1+).
 
 ## Compatibility rule
 New fields are only ever **appended** to a struct. Receivers accept the older, shorter length and use
