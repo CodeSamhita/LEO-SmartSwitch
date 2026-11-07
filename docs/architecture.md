@@ -67,7 +67,7 @@ The peak brightness is 5/255 in a lit room and 2/255 in a dark one.
 ## History
 - **What is recorded:** for every device, the hub keeps one value per 5 minutes for 24 hours, and one per hour for 7 days. That is
   average watts for a switch (from the watts set per relay) and average level for the tank.
-- **Saving:** it is written to flash every 10 minutes and just before every planned restart (update, restart button), so only a power cut can lose up to 10 minutes. The 10-second readings for the 1 h chart live in memory only.
+- **Saving:** it is written to flash every 10 minutes and just before every planned restart (update, restart button), so only a power cut can lose up to 10 minutes. The 10-second readings for the 1 h chart live in memory; they are saved just before a planned restart and restored after it. Where they are missing, the 1 h chart uses the 5-minute values. Every chart starts where its history starts.
 - **Gaps:** when a device was offline, or the tank had no reading, the chart shows a gap.
 
 ## Files on the hub (LittleFS)

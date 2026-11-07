@@ -19,9 +19,11 @@ Quick controls for every device. Tap a card (not its buttons) to open the device
   distance, status and room light. The bar is **yellow** when the sensor has a problem.
 
 ## Switch page
+Tabs: **Overview** (relays, power chart) · **Relays** (names, watts, in use) · **Setup** (touch pads, name, restart, update, remove, Advanced).
 - **Controls:** every relay (and how long it has been on), All on / All off, signal, uptime and firmware.
 - **Power use:** a chart with **1 h / 6 h / 24 h / Yesterday / 7 days**.
   - **Points:** each point is the average power of 5 minutes (24 h) or of an hour (Yesterday, 7 days).
+  - **Scale:** always 0 to the total watts of the relays in use, on every range.
   - **The last point** is the **live** power right now.
   - **Footer:** *Now … W*, the estimated energy (kWh) and the peak.
 - **Relays:** name and watts per relay. **In use**: switch it off for a relay with nothing connected.
@@ -30,6 +32,8 @@ Quick controls for every device. Tap a card (not its buttons) to open the device
 - **Advanced:** chip temperature, free memory, storage, firmware size, last restart cause, ESP-IDF version, and **Factory reset this device**.
 
 ## Tank page
+Tabs: **Overview** (live view, actions, chart) · **Alarms** (rules, buzzer, quiet hours) · **Display** (colours, highlight, LEDs, daytime display) · **Setup** (tank size, status labels, name, restart, update, remove, Advanced).
+The alarm rules are a short list (for example *Rises to 95 % · Long beeps ×8 · Blue*); tap a rule to edit it.
 - **Live view:** level, distance, status, room light, signal and firmware.
 - **Actions:** **Silence alarm**, **Beep** (a short test beep) and **Identify**.
 - **Water level:** a chart with **1 h / 6 h / 24 h / Yesterday / 7 days**, the last point live, plus the lowest and highest level.
