@@ -44,7 +44,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.1.0"
+#define HUB_FW            "1.1.1"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -52,7 +52,7 @@
 #define STA_RETRY_MS      15000
 #define AP_FALLBACK_MS    30000     // open the emergency hotspot if WiFi isn't up within this
 #define CONSOLE_LINES     150
-#define CONSOLE_LINE_LEN  110
+#define CONSOLE_LINE_LEN  128
 #define DEV_FILE          "/devices.json"
 #define EDGE_BIN          "/edge.bin"
 #define ACT_FILE          "/activity.log"
@@ -187,8 +187,14 @@ size_t leoVerify(const uint8_t* pkt, size_t total, const uint8_t* key, uint32_t 
 
 /* ------------------------------ helpers ---------------------------- */
 void dbg(const String& msg) {
-  char line[CONSOLE_LINE_LEN];
-  snprintf(line, sizeof(line), "[%lus] %s", (unsigned long)(millis() / 1000), msg.c_str());
+  char line[CONSOLE_LINE_LEN], stamp[24];
+  time_t now = time(nullptr);
+  if (now > 1700000000) {                       // clock set by NTP: "26-11-07 08:44:12"
+    struct tm tm; localtime_r(&now, &tm); strftime(stamp, sizeof(stamp), "%y-%m-%d %H:%M:%S", &tm);
+  } else {                                      // before NTP: seconds since boot
+    snprintf(stamp, sizeof(stamp), "boot+%lus", (unsigned long)(millis() / 1000));
+  }
+  snprintf(line, sizeof(line), "[%s] %s", stamp, msg.c_str());
   xSemaphoreTake(consoleLock, portMAX_DELAY);
   memcpy(consoleBuf[consoleHead], line, sizeof(line));
   consoleHead = (consoleHead + 1) % CONSOLE_LINES;
@@ -875,7 +881,7 @@ static const char INDEX_HTML[] PROGMEM =
   "\n"
   "/* activity */\n"
   "async function loadActivity(){const a=await jget('/api/activity');if(!a)return;\n"
-  "  $('#actlist').innerHTML=a.items.length?a.items.map(x=>`<div class=\"act ${x.blocked?'blocked':''}\"><time>${x.t?new Date(x.t*1000).toLocaleString([], {day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'(clock not set)'}</time><span>${esc(x.msg)}</span></div>`).join(''):'<div class=\"meta\">Nothing recorded yet.</div>'}\n"
+  "  $('#actlist').innerHTML=a.items.length?a.items.map(x=>`<div class=\"act ${x.blocked?'blocked':''}\"><time>${x.t?((d,p)=>`${p(d.getFullYear()%100)}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`)(new Date(x.t*1000),n=>String(n).padStart(2,'0')):'(clock not set)'}</time><span>${esc(x.msg)}</span></div>`).join(''):'<div class=\"meta\">Nothing recorded yet.</div>'}\n"
   "\n"
   "/* hub page */\n"
   "function renderLock(){const L=(S.hub||{}).lock||{};$('#lockManual').classList.toggle('on',!!L.manual);$('#lockSched').classList.toggle('on',!!L.sched);\n"
