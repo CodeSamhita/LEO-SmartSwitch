@@ -72,7 +72,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13 };   // C_FACTORY: wipe all settings + pairing, restart   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright, value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13 };   // C_FACTORY: wipe all settings + pairing, restart   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -81,7 +81,7 @@ struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t roo
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
-struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; };   // tank settings (palette 0 red-blue, 1 red-green; tank 1.5+)
+struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
 struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
@@ -132,6 +132,7 @@ struct Dev {
   bool     tcfgKnown;                     // tank settings (from M_TANK_INFO)
   float    tFullCm, tEmptyCm;
   uint8_t  tFullPct, tLowPct, tBuzzer, tQuietFrom, tQuietTo, tPalette, tLedCount, tShowFrom, tShowTo, tMinBright;
+  uint8_t  tColors[24]; bool tColorsKnown;  // custom level colours (tank 1.6+)
   uint8_t  hideMask;                      // switch relays marked "not in use" (hidden, skipped by All on) - saved in devices.json
   bool     diagKnown;                     // chip details from M_DIAG (Advanced view)
   int16_t  dTemp; uint32_t dHeap, dHeapMin, dFsUsed, dFsTotal, dFlash, dSketch, dSketchMax; uint8_t dReset, dCpu; char dSdk[16];
@@ -634,6 +635,7 @@ void handlePacket(const RxItem& it) {
     d.tFullCm = m.fullCm; d.tEmptyCm = m.emptyCm; d.tFullPct = m.fullPct; d.tLowPct = m.lowPct;
     d.tBuzzer = m.buzzer; d.tQuietFrom = m.quietFrom; d.tQuietTo = m.quietTo; d.tPalette = m.palette; d.tLedCount = m.ledCount;
     d.tShowFrom = m.showFrom; d.tShowTo = m.showTo; d.tMinBright = m.minBright;
+    d.tColorsKnown = blen >= sizeof(MsgTankInfo); memcpy(d.tColors, m.colors, sizeof(d.tColors));
     d.tcfgKnown = true; stateDirty = true;
   } else if (h->type == M_DIAG && blen >= sizeof(MsgDiag)) {
     MsgDiag m; memcpy(&m, it.data, sizeof(m));
@@ -750,6 +752,8 @@ String stateJson() {
           c["buzzer"] = (bool)v.tBuzzer; c["quietFrom"] = v.tQuietFrom; c["quietTo"] = v.tQuietTo;
           c["palette"] = v.tPalette; c["ledCount"] = v.tLedCount;
           c["showFrom"] = v.tShowFrom; c["showTo"] = v.tShowTo; c["minBright"] = v.tMinBright;
+          if (v.tColorsKnown) { JsonArray ca = c["colors"].to<JsonArray>();
+            for (int k = 0; k < 8; ++k) { char hx[8]; snprintf(hx, sizeof(hx), "#%02x%02x%02x", v.tColors[k * 3], v.tColors[k * 3 + 1], v.tColors[k * 3 + 2]); ca.add(hx); } }
         }
       }
     } }
@@ -896,6 +900,7 @@ static const char INDEX_HTML[] PROGMEM =
   "      <label id=\"oldlbl\">Current password</label><input id=\"oldpw\" type=\"password\" autocomplete=\"current-password\">\n"
   "      <label>New password (at least 6 characters)</label><input id=\"newpw\" type=\"password\" autocomplete=\"new-password\">\n"
   "      <div class=\"row\"><button class=\"btn p\" onclick=\"setPassword()\">Save password</button><button class=\"btn\" onclick=\"logout()\">Sign out</button></div>\n"
+  "      <div class=\"row\" id=\"rmpwrow\"><button class=\"btn d\" onclick=\"removePassword()\">Remove password…</button></div>\n"
   "      <div class=\"note\" id=\"pwmsg\"></div>\n"
   "      <label style=\"margin-top:14px\">Emergency hotspot password (used only if WiFi is down for 30 s)</label>\n"
   "      <div class=\"row\" style=\"margin:0\"><input id=\"appw\" type=\"text\" autocomplete=\"off\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveApPass()\">Save</button></div>\n"
@@ -1074,7 +1079,12 @@ static const char INDEX_HTML[] PROGMEM =
   "async function loadHub(){const h=await jget('/api/hub');if(!h)return;$('#ssid').value=h.ssid||'';$('#hname').value=h.name||'';$('#appw').value=h.apPass||'';\n"
   "  $('#netinfo').textContent=(h.wifi?('Connected to '+h.ssid+' · '+h.ip+' · channel '+h.channel+' · '+h.rssi+' dBm'):'Not connected to WiFi')+' · hub fw '+h.fw+' · leohub.local';\n"
   "  $('#pwstate').textContent=h.passwordSet?'A hub password is set. Phones that signed in are remembered.':'No password set yet — set one so only you can control your devices.';\n"
-  "  $('#oldlbl').style.display=$('#oldpw').style.display=h.passwordSet?'':'none';renderLock()}\n"
+  "  $('#oldlbl').style.display=$('#oldpw').style.display=$('#rmpwrow').style.display=h.passwordSet?'':'none';renderLock()}\n"
+  "async function removePassword(){if(!$('#oldpw').value){$('#pwmsg').textContent='Type the current password first.';return}\n"
+  "  if(!confirm('Remove the hub password? Anyone on your WiFi can then control your devices.'))return;\n"
+  "  const r=await call('/api/password',{old:$('#oldpw').value,remove:true});\n"
+  "  if(r&&r.ok){$('#pwmsg').textContent='Password removed.';$('#oldpw').value='';loadHub()}\n"
+  "  else $('#pwmsg').textContent=r&&r.status===403?'Current password is wrong.':'Could not remove.'}\n"
   "async function setPassword(){const n=$('#newpw').value;if(n.length<6){$('#pwmsg').textContent='Use at least 6 characters.';return}\n"
   "  const r=await call('/api/password',{old:$('#oldpw').value,new:n});\n"
   "  if(r&&r.ok){$('#pwmsg').textContent='Password saved. This browser stays signed in.';$('#oldpw').value=$('#newpw').value='';loadHub()}\n"
@@ -1153,8 +1163,12 @@ static const char INDEX_HTML[] PROGMEM =
   "  </div>\n"
   "  <h3>LED display</h3>\n"
   "  <div class=\"card\">\n"
-  "    <label>Level colours${q('Colour of the level LEDs from the bottom (red) to the top: fading to blue, or fading to green.')}</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn ${c.palette?'':'p'}\" onclick=\"tset(8,0)\">Red → Blue</button><button class=\"btn ${c.palette?'p':''}\" onclick=\"tset(8,1)\">Red → Green</button></div>\n"
+  "    <label>Level colours${q('Colour of the level LEDs from the bottom to the top: red fading to blue, red fading to green, or Custom — pick your own colour for every LED.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><button class=\"btn ${c.palette==0?'p':''}\" onclick=\"tset(8,0)\">Red → Blue</button><button class=\"btn ${c.palette==1?'p':''}\" onclick=\"tset(8,1)\">Red → Green</button>${c.colors?`<button class=\"btn ${c.palette==2?'p':''}\" onclick=\"tset(8,2)\">Custom</button>`:''}</div>\n"
+  "    ${c.palette==2&&c.colors?`<div style=\"margin-top:10px\">${c.colors.slice(0,c.ledCount||7).map((col,i)=>`<div class=\"switchrow\" style=\"margin:4px 0\"><span>LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
+  "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).join('')}\n"
+  "      <div class=\"row\"><button class=\"btn p\" onclick=\"saveColors()\">Save colours</button></div>\n"
+  "      <p class=\"note\">LED 1 is the bottom of the strip. Only LEDs that are lit for the current level show their colour.</p></div>`:''}\n"
   "    <label>LEDs used to show the level${q('How many LEDs, counted from the bottom of the strip, show the water level (1 to 8). A full tank lights all of them. The top LED is always the small status light.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tLeds\" type=\"number\" min=\"1\" max=\"8\" value=\"${c.ledCount||7}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveLeds()\">Save</button></div>\n"
   "    <label style=\"margin-top:12px\">Daytime display${q('Normally the level LEDs follow the room light and go dark in a dark room. Between these times they always stay on, at least at the minimum brightness below, so you can see the level at a glance. Outside these times (night) they go dark in a dark room. Set both times the same to turn this off.')}</label>\n"
@@ -1183,6 +1197,9 @@ static const char INDEX_HTML[] PROGMEM =
   "  const ok=fp>c.fullPct?(await tset(3,fp)&&await tset(4,lp)):(await tset(4,lp)&&await tset(3,fp));\n"
   "  m.textContent=ok?'Sent — the tank confirms by showing the new values.':'Could not reach the hub.'}\n"
   "async function saveQuiet(){if(await tset(6,$('#tQf').value)&&await tset(7,$('#tQt').value))toast('Quiet hours sent')}\n"
+  "async function saveColors(){let n=0;for(const el of document.querySelectorAll('#tset input[data-led]')){if(el.value===el.dataset.was)continue;\n"
+  "    if(!await tset(13+(+el.dataset.led),parseInt(el.value.slice(1),16)))return toast('Could not reach the hub');n++}\n"
+  "  toast(n?n+' colour'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
   "async function saveLeds(){const n=Math.round(+$('#tLeds').value);if(!(n>=1&&n<=8)){toast('Choose 1 to 8 LEDs');return}if(await tset(9,n))toast('Sent')}\n"
   "async function saveShow(){const b=Math.round(+$('#tMb').value);if(!(b>=1&&b<=60)){toast('Brightness must be 1 to 60');return}\n"
   "  if(await tset(10,$('#tSf').value)&&await tset(11,$('#tSt').value)&&await tset(12,b))toast('Daytime display sent')}\n"
@@ -1351,6 +1368,11 @@ void webBegin() {
     if (!guard(r)) return;
     String o = j["old"] | ""; String n = j["new"] | "";
     if (pwHash.length() && !constEq(hashPass(o), pwHash)) { r->send(403, "application/json", "{\"err\":\"old\"}"); return; }
+    if (j["remove"] | false) {                                 // remove the password (needs the current one)
+      pwHash = ""; prefs.remove("pw"); tokenCount = 0; tokensSave();
+      activity("Hub password removed (from " + who(r) + ")", false);
+      jsonOk(r); return;
+    }
     if (n.length() < 6) { r->send(400, "application/json", "{\"err\":\"short\"}"); return; }
     pwHash = hashPass(n); prefs.putString("pw", pwHash);
     String t = newToken(); tokenCount = 0; tokens[tokenCount++] = t; tokensSave();   // everyone else signs in again
@@ -1459,7 +1481,9 @@ void webBegin() {
     if (cmd == C_SILENCE) activity(dn + ": alarm silenced (from " + who(r) + ")", false);
     if (cmd == C_TANK_SET) {
       static const char* names[] = { "", "full distance", "empty distance", "full alarm level", "low alarm level", "buzzer", "quiet hours from", "quiet hours until", "LED colours", "level LEDs", "daytime display from", "daytime display until", "daytime minimum brightness" };
-      String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx == 8 ? String(f != 0 ? "red to green" : "red to blue") : idx == 9 || idx == 12 ? String((int)f) :
+      char hx[8]; snprintf(hx, sizeof(hx), "#%06lx", (unsigned long)f & 0xFFFFFFUL);
+      if (idx >= 13 && idx <= 20) activity(dn + ": LED " + String(idx - 12) + " colour set to " + hx + " (from " + who(r) + ")", false);
+      String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx == 8 ? String(f >= 2 ? "custom" : f != 0 ? "red to green" : "red to blue") : idx == 9 || idx == 12 ? String((int)f) :
                  idx <= 2 ? String(f, 1) + " cm" : idx <= 4 ? String((int)f) + " %" : String((int)f) + ":00";
       if (idx >= 1 && idx <= 12) activity(dn + ": " + names[idx] + " set to " + v + " (from " + who(r) + ")", false);
     }
