@@ -85,6 +85,11 @@ This shows that power is good and the board is booting.
 - **Tank:** reads its own LDR first, then runs its red, blue and green sweep: 25/255 with a chirp in a
   lit room, 3/255 and silent in a dark one.
 
+## Synced breathing (hub 1.5.0, switch 2.5.0, tank 1.3.0)
+Each keep-alive also carries the hub's beat (`millis() % 10000`). Edges keep an offset to it,
+so every LEO status LED breathes at the same moment. Big differences are corrected at once and
+small radio jitter is smoothed. Without the hub, each device keeps breathing on its own clock.
+
 ## Hub status LED
 The onboard RGB LED (GPIO 48, or 38 on DevKitC v1.1) gives the same quick faint breath:
 - Green every 5 s: on WiFi.

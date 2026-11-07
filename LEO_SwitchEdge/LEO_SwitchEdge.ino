@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.4.0-sw"
+#define EDGE_FW           "2.5.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -70,7 +70,7 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; };   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat; };   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
@@ -127,6 +127,18 @@ uint8_t scanStep = 0;
 int16_t  hubMins = -1; uint32_t hubMinsAt = 0;   // time of day from the hub; keeps running locally if the hub goes away
 uint8_t  hubRoom = 255; uint32_t hubRoomAt = 0;  // room light from the tank's LDR, via the hub (1 lit, 0 dark)
 uint8_t  savedRoom = 0;                           // last room light heard, kept in flash for the power-on glow
+/* Breathing sync: the hub sends its beat (millis() % 10000) in every keep-alive; we keep an
+   offset so all LEO LEDs breathe on the same beat. Big jumps are taken at once, small radio
+   jitter is smoothed. Without the hub we just keep breathing on our own clock.               */
+int32_t beatOffset = 0; bool beatKnown = false;
+uint32_t beatMillis() { return millis() + (uint32_t)beatOffset; }
+void beatSync(uint16_t beat) {
+  if (beat >= 10000) return;
+  int32_t d = (int32_t)beat - (int32_t)(beatMillis() % 10000);
+  if (d > 5000) d -= 10000; else if (d < -5000) d += 10000;
+  if (!beatKnown || d > 60 || d < -60) beatOffset += d; else beatOffset += d / 4;
+  beatKnown = true;
+}
 uint32_t lastState = 0, lastScanStep = 0, lastVerified = 0, linkedSince = 0, identifyUntil = 0, restartAt = 0;
 bool     stateDirty = true;
 bool     otaActive = false; uint32_t otaSize = 0, otaWritten = 0;
@@ -328,6 +340,7 @@ void handlePacket(const RxItem& it) {
     if (blen >= sizeof(LeoHdr) + 2) {
       MsgPing p = {}; p.room = 255; memcpy(&p, it.data, min(blen, sizeof(p)));
       if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); }
+      if (blen >= sizeof(MsgPing)) beatSync(p.beat);
       if (blen >= sizeof(MsgPing) && p.room != 255) {
         hubRoom = p.room; hubRoomAt = millis();
         if (p.room != savedRoom) { savedRoom = p.room; prefs.putUChar("room", savedRoom); }   // for the next power-on glow
@@ -393,7 +406,7 @@ float daylight() {                                   // 1 = room lit / day, 0 = 
   return (m >= 7 * 60 && m < 18 * 60) ? 1 : 0;
 }
 uint8_t breathLevel(uint32_t period, uint8_t peak) { // quick sine breath at the start of each period
-  uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = millis() % period;
+  uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = beatMillis() % period;   // on the hub's beat
   if (t >= len) return 0;
   float s = sinf(PI * t / len);
   return (uint8_t)(s * s * peak + 0.5f);

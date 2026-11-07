@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.2.0-tank"
+#define EDGE_FW           "1.3.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -81,7 +81,7 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; };   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat; };   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
@@ -136,6 +136,18 @@ uint8_t  key[16]; bool hasKey = false;
 uint32_t nonce = 0, txCtr = 0, rxCtr = 0;
 uint8_t  channel = 1, txSeq = 0, scanStep = 0;
 int16_t  hubMins = -1; uint32_t hubMinsAt = 0;
+/* Breathing sync: the hub sends its beat (millis() % 10000) in every keep-alive; we keep an
+   offset so all LEO LEDs breathe on the same beat. Big jumps are taken at once, small radio
+   jitter is smoothed. Without the hub we just keep breathing on our own clock.               */
+int32_t beatOffset = 0; bool beatKnown = false;
+uint32_t beatMillis() { return millis() + (uint32_t)beatOffset; }
+void beatSync(uint16_t beat) {
+  if (beat >= 10000) return;
+  int32_t d = (int32_t)beat - (int32_t)(beatMillis() % 10000);
+  if (d > 5000) d -= 10000; else if (d < -5000) d += 10000;
+  if (!beatKnown || d > 60 || d < -60) beatOffset += d; else beatOffset += d / 4;
+  beatKnown = true;
+}
 uint32_t lastState = 0, lastScanStep = 0, lastVerified = 0, linkedSince = 0, identifyUntil = 0, restartAt = 0;
 bool     stateDirty = true;
 bool     otaActive = false; uint32_t otaSize = 0, otaWritten = 0;
@@ -258,7 +270,7 @@ void buttonTick() {
 const uint8_t GRAD[LEVEL_LEDS][3] = { {255,0,0}, {223,0,32}, {159,0,96}, {128,0,128}, {64,0,191}, {32,0,223}, {0,0,255} };
 float daylight() { return roomLit() ? 1 : 0; }           // the tank's own LDR is the room's light sensor
 uint8_t breathLevel(uint32_t period, uint8_t peak) {     // quick sine breath at the start of each period
-  uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = millis() % period;
+  uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = beatMillis() % period;   // on the hub's beat
   if (t >= len) return 0;
   float s = sinf(PI * t / len);
   return (uint8_t)(s * s * peak + 0.5f);
@@ -405,7 +417,7 @@ void handlePacket(const RxItem& it) {
   rxCtr = ctr; lastVerified = millis();
 
   if (h->type == M_PING) {
-    if (blen >= sizeof(LeoHdr) + 2) { MsgPing p = {}; memcpy(&p, it.data, min(blen, sizeof(p))); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } }
+    if (blen >= sizeof(LeoHdr) + 2) { MsgPing p = {}; memcpy(&p, it.data, min(blen, sizeof(p))); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } if (blen >= sizeof(MsgPing)) beatSync(p.beat); }
     return;
   }
   if (h->type == M_CMD && blen >= sizeof(MsgCmd)) { MsgCmd c; memcpy(&c, it.data, sizeof(c)); handleCmd(c); return; }
