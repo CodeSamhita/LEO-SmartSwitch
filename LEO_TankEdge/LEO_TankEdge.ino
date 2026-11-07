@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.3.0-tank"
+#define EDGE_FW           "1.4.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -55,15 +55,10 @@
 #define HUB_SILENT_MS     10000       // no verified packet from the hub this long -> search again
 #define SCAN_DWELL_MS     250         // per channel while searching
 #define MEASURE_MS        1500        // one level measurement (10 pings) this often
-#define FULL_PCT          95
-#define LOW_PCT           10
-#define REARM_LOW_PCT     15
-#define REARM_HIGH_PCT    90
+// alert levels, buzzer and quiet hours are settings (Preferences), changed from the hub web app
 #define ALERT_ROUNDS      10
 #define LIT_ON_LDR        120         // room counts as lit above this ...
 #define LIT_OFF_LDR       80          // ... and as dark again below this (no flicker at dusk)
-#define QUIET_FROM_H      22          // buzzer also quiet 22:00-06:00 (clock from the hub)
-#define QUIET_TO_H        6
 
 /* ===================== LEO EDGE PROTOCOL v2 ==========================
    Keep IDENTICAL in the hub and every edge sketch. Packed, little-endian.
@@ -73,10 +68,11 @@
    increases per direction within a session (replays are dropped).       */
 #define LEO_MAGIC  0x4C45
 #define LEO_PROTO  2
-enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5,
+enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5, M_TANK_INFO = 6,
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
-enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9 };
+enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12 };   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo, value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -85,6 +81,7 @@ struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t roo
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
+struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; };   // tank settings
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
 struct __attribute__((packed)) MsgOtaData  { LeoHdr h; uint32_t off; uint16_t len; uint8_t data[200]; };
@@ -124,6 +121,10 @@ size_t leoVerify(const uint8_t* pkt, size_t total, const uint8_t* key, uint32_t 
 
 String devName = "Water tank";
 float  tankFullCm = 15.0f, tankEmptyCm = 103.0f;     // calibration (Preferences "full" / "empty")
+uint8_t fullPct = 95, lowPct = 10;                    // alarm levels   (Preferences "fp" / "lp")
+bool    buzzerOn = true;                              // buzzer enabled (Preferences "bz")
+uint8_t quietFrom = 22, quietTo = 6;                  // buzzer quiet hours, from == to -> none ("qf" / "qt")
+uint32_t beepUntil = 0;                               // "test buzzer" from the web app
 
 QueueHandle_t rxq;
 Preferences prefs;
@@ -178,8 +179,12 @@ int  clockMins() {                                       // local time from the 
   if (hubMins < 0 || millis() - hubMinsAt > 24UL * 3600 * 1000) return -1;
   return (hubMins + (int)((millis() - hubMinsAt) / 60000)) % 1440;
 }
-bool quietHours() { int m = clockMins(); return m >= 0 && (m >= QUIET_FROM_H * 60 || m < QUIET_TO_H * 60); }
-bool buzzerAllowed() { return roomLit() && !quietHours(); }
+bool quietHours() {
+  int m = clockMins(); if (m < 0 || quietFrom == quietTo) return false;
+  int a = quietFrom * 60, b = quietTo * 60;
+  return a < b ? (m >= a && m < b) : (m >= a || m < b);       // window may cross midnight
+}
+bool buzzerAllowed() { return buzzerOn && roomLit() && !quietHours(); }
 
 /* ------------------------------ sensors ---------------------------- */
 float pingOnceCm() {                    // one HC-SR04 ping; <0 = no echo
@@ -190,6 +195,13 @@ float pingOnceCm() {                    // one HC-SR04 ping; <0 = no echo
   if (us == 0) return -1;
   float cm = us * 0.0343f / 2;
   return (cm < 2 || cm > 400) ? -1 : cm;
+}
+void recomputeLevel() {                 // distance -> % with the current calibration
+  float pct = (tankEmptyCm - distCm) * 100.0f / (tankEmptyCm - tankFullCm);
+  pct = constrain(pct, 0.0f, 100.0f);
+  uint8_t leds = (uint8_t)roundf(pct * LEVEL_LEDS / 100.0f);
+  if (leds != levelLeds || fabsf(levelPct - pct) >= 1) stateDirty = true;
+  levelPct = pct; levelLeds = leds;
 }
 // 10 pings spread over the measurement period (one per call, ~150 ms apart), median of the good ones
 float    pings[10]; uint8_t pingCount = 0, pingFails = 0; uint32_t lastPingAt = 0;
@@ -213,11 +225,7 @@ void measureTick() {
   badStreak = 0;
   if (!sensorOk) { if (++goodStreak < 3) return; sensorOk = true; dbg("Ultrasonic sensor OK"); }
   distCm = med;
-  float pct = (tankEmptyCm - med) * 100.0f / (tankEmptyCm - tankFullCm);
-  levelPct = constrain(pct, 0.0f, 100.0f);
-  uint8_t leds = (uint8_t)roundf(levelPct * LEVEL_LEDS / 100.0f);
-  if (leds != levelLeds || fabsf(levelPct - pct) > 1) stateDirty = true;
-  levelLeds = leds;
+  recomputeLevel();
 }
 void ldrTick() {
   static uint32_t last = 0; if (millis() - last < 500) return; last = millis();
@@ -233,8 +241,8 @@ void stopAlert() { alertNow = A_NONE; alertOn = false; buzzer(false); stateDirty
 void alertTick() {
   if (!sensorOk) { if (alertNow) stopAlert(); tstate = T_SENSOR; return; }
   // re-arm once the level is back in the normal band
-  if (levelPct >= REARM_LOW_PCT && levelPct <= REARM_HIGH_PCT) { armedFull = armedLow = true; silenced = false; }
-  TankState s = levelPct >= FULL_PCT ? T_FULL : levelPct <= LOW_PCT ? T_LOW : T_NORMAL;
+  if (levelPct >= lowPct + 5 && levelPct <= fullPct - 5) { armedFull = armedLow = true; silenced = false; }
+  TankState s = levelPct >= fullPct ? T_FULL : levelPct <= lowPct ? T_LOW : T_NORMAL;
   if (s != tstate) { tstate = s; stateDirty = true; }
 
   if (!alertNow) {
@@ -355,6 +363,26 @@ void sendState() {
   sendHub(&m, sizeof(m));
   lastState = millis(); stateDirty = false;
 }
+void sendTankInfo() {                   // our settings, so the hub web app can show and edit them
+  MsgTankInfo m = {}; fillHdr(m.h, M_TANK_INFO);
+  m.fullCm = tankFullCm; m.emptyCm = tankEmptyCm; m.fullPct = fullPct; m.lowPct = lowPct;
+  m.buzzer = buzzerOn ? 1 : 0; m.quietFrom = quietFrom; m.quietTo = quietTo;
+  sendHub(&m, sizeof(m));
+}
+void applySetting(uint8_t idx, float v) {
+  switch (idx) {
+    case 1: if (v >= 2 && v < tankEmptyCm - 10) { tankFullCm = v; prefs.putFloat("full", v); } break;
+    case 2: if (v > tankFullCm + 10 && v <= 400) { tankEmptyCm = v; prefs.putFloat("empty", v); } break;
+    case 3: if (v > lowPct + 10 && v <= 100) { fullPct = (uint8_t)v; prefs.putUChar("fp", fullPct); } break;
+    case 4: if (v >= 0 && v < fullPct - 10) { lowPct = (uint8_t)v; prefs.putUChar("lp", lowPct); } break;
+    case 5: buzzerOn = v != 0; prefs.putBool("bz", buzzerOn); if (!buzzerOn && !beepUntil) buzzer(false); break;
+    case 6: if (v >= 0 && v < 24) { quietFrom = (uint8_t)v; prefs.putUChar("qf", quietFrom); } break;
+    case 7: if (v >= 0 && v < 24) { quietTo = (uint8_t)v; prefs.putUChar("qt", quietTo); } break;
+  }
+  if (idx <= 2 && sensorOk) recomputeLevel();
+  dbg("Setting " + String(idx) + " = " + String(v, 1));
+  sendTankInfo(); stateDirty = true;
+}
 void sendOtaAck(uint8_t phase, uint32_t off, bool ok, const char* err) {
   MsgOtaAck a = {}; fillHdr(a.h, M_OTA_ACK); a.phase = phase; a.off = off; a.ok = ok ? 1 : 0;
   copyStr(a.err, sizeof(a.err), err);
@@ -379,8 +407,11 @@ void handleCmd(const MsgCmd& c) {
     case C_IDENTIFY: identifyUntil = millis() + 4000; break;
     case C_RENAME:   if (c.text[0]) { devName = String(c.text); prefs.putString("name", devName); } break;
     case C_REBOOT:   restartAt = millis() + 300; break;
-    case C_INFO:     stateDirty = true; break;
+    case C_INFO:     stateDirty = true; sendTankInfo(); break;
     case C_UNPAIR:   forgetHub("hub asked us to forget it"); break;
+    case C_TANK_SET: applySetting(c.idx, c.f); break;
+    case C_SILENCE:  if (alertNow) { silenced = true; dbg("Alert silenced from the web app"); } break;
+    case C_BEEP:     buzzer(true); beepUntil = millis() + 150; break;
   }
 }
 
@@ -403,7 +434,7 @@ void handleWelcome(const RxItem& it) {
   if (changed) { prefs.putBytes("hub", hubMac, 6); prefs.putUChar("ch", channel); }
   linked = true; linkedSince = millis(); lastVerified = millis();
   dbg("Linked to hub " + macStr(hubMac) + " (" + String(w.hubName) + ") on channel " + String(channel) + " - signed session");
-  sendState();
+  sendState(); sendTankInfo();
 }
 
 void handlePacket(const RxItem& it) {
@@ -509,6 +540,10 @@ void setup() {
   tankFullCm = prefs.getFloat("full", tankFullCm);
   tankEmptyCm = prefs.getFloat("empty", tankEmptyCm);
   if (tankEmptyCm - tankFullCm < 10) { tankFullCm = 15; tankEmptyCm = 103; }
+  fullPct = prefs.getUChar("fp", fullPct); lowPct = prefs.getUChar("lp", lowPct);
+  if (fullPct > 100 || lowPct + 10 >= fullPct) { fullPct = 95; lowPct = 10; }
+  buzzerOn = prefs.getBool("bz", true);
+  quietFrom = prefs.getUChar("qf", quietFrom) % 24; quietTo = prefs.getUChar("qt", quietTo) % 24;
   if (prefs.getBytes("hub", hubMac, 6) == 6) hubKnown = true;
   if (prefs.getBytes("key", key, 16) == 16) hasKey = true;
   uint8_t ch = prefs.getUChar("ch", 1);
@@ -544,6 +579,7 @@ void loop() {
     alertTick();
     ledTick();
   }
+  if (beepUntil && (int32_t)(millis() - beepUntil) >= 0) { beepUntil = 0; if (!alertOn) buzzer(false); }
   if (linked && !otaActive && (stateDirty || millis() - lastState >= STATE_MS)) sendState();
   statusPrint();
   if (restartAt && (int32_t)(millis() - restartAt) >= 0) ESP.restart();
