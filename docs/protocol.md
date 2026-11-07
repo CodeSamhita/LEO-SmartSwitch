@@ -20,7 +20,7 @@ little-endian structs.
 | 6 | TANK_INFO | tank → hub | calibration, alarm %, buzzer, quiet hours, palette, LED count, daytime display, min brightness |
 | 7 | CMD | hub → edge | cmd, idx, val, f, text |
 | 10–13 | OTA_BEGIN/DATA/END/ACK | both | stop-and-wait firmware transfer, 200-byte chunks |
-| 14 | PING | hub → edge | keep-alive: local time (minutes), room light, beat (ms % 10000) |
+| 14 | PING | hub → edge | keep-alive: local time (minutes), room light, beat (ms % 10000); with g = 1 also the global home settings (quiet hours, daytime hours, status-light brightness day/night, room-light thresholds) |
 | 15 | DIAG | edge → hub | chip temperature, heap, storage, flash, firmware size, reset reason, CPU MHz, ESP-IDF version |
 | 16 | TANK_RULES | tank → hub | 6 alarm rules × {on, level %, dir (0 rises to, 1 drops to), sound 0–5, repeats, flash colour 0–5} |
 

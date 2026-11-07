@@ -53,13 +53,13 @@ The alarm rules are a short list (for example *Rises to 95 % · Long beeps ×8 �
   - **Stopping it:** the tank's push button or **Silence alarm** stops it.
   - **Defaults:** rule 1 = rises to 95 %, long beeps ×10, green. Rule 2 = drops to 10 %, short beeps ×10, red.
   - **Status labels:** at what % the status text says *Full* or *Low*. This does not affect alarms.
-  - **Buzzer** on/off, and **quiet hours**. The buzzer is also quiet whenever the room is dark; the LEDs still flash.
+  - **Buzzer** on/off. Quiet hours are a global Home setting (shown read-only). The buzzer is also quiet whenever the room is dark; the LEDs still flash.
 - **LED display:**
   - **Level colours:** Red → Blue, Red → Green, **Spectrum** (red → orange → yellow → green → cyan → blue, spread over the LEDs in use), or **Custom**. Custom gives one colour picker per LED, listed **top LED first**,
     like the real strip.
   - **Current level highlight** (slider 0–50 %): how much the top lit LED stands out. Half makes it brighter, half makes the LEDs below dimmer.
   - **LEDs used to show the level:** 1–8, counted from the bottom.
-  - **Daytime display:** between these hours the level LEDs never go fully dark (they stay at least at *Minimum brightness*).
+  - **Daytime minimum brightness:** during the global daytime hours the level LEDs never go fully dark; they stay at least this bright.
 - **After a restart** (power cut or update), a rule does not sound for a level the tank is already at. It fires only when the level actually rises or drops into it.
 - **Sensor problem:** when the ultrasonic sensor fails, all level LEDs on the tank **blink yellow rapidly**.
 - **While a device is updating,** its page says so. Settings and controls work again once it has restarted.
@@ -78,6 +78,12 @@ Every ON/OFF, blocked attempt, setting or rule change, pairing, update, password
 with the date and time. **Clear log** deletes it.
 
 ## Hub
+- **Home settings** (global — apply to every device; each device keeps the last values it received):
+  - **Quiet hours:** no sounds from any device.
+  - **Daytime hours:** displays may stay on dimly; also the day/night fallback when no room light reading is available.
+  - **Status light brightness:** in a bright room and in a dark room (1–40).
+  - **Room light thresholds:** bright above / dark below (the tank's light sensor reading; the current reading is shown).
+  Device pages show these read-only, with a link here. Everything that depends on a device's hardware stays on that device's page.
 - **Night lock:** lock now, or every night. While it is active, ON commands are refused and recorded; OFF always works.
 - **Security:**
   - Set or change the web password.

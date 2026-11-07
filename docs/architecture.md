@@ -37,6 +37,10 @@
 When the router changes WiFi channel, the hub follows it and logs *"Router moved WiFi from channel X
 to Y"*. The edges find the hub again on their own, trying the last known channel first.
 
+## Global and device settings
+- **Global (Hub → Home settings):** quiet hours, daytime hours, status-light brightness, room-light thresholds. Stored on the hub, sent in every keep-alive, saved by each device so they still apply when the hub is off.
+- **Per device:** everything that depends on the device's hardware: tank size, alarm rules, colours, LED count, highlight, minimum brightness; relays, watts, touch pads.
+
 ## Room light (one sensor for the whole room)
 The tank's LDR is the room's light sensor:
 1. The tank sends its reading to the hub.
