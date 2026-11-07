@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.6.0-tank"
+#define EDGE_FW           "1.7.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -69,10 +69,10 @@
 #define LEO_MAGIC  0x4C45
 #define LEO_PROTO  2
 enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5, M_TANK_INFO = 6,
-                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15 };
+                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13 };   // C_FACTORY: wipe all settings + pairing, restart   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB), value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -82,6 +82,7 @@ struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
+struct __attribute__((packed)) MsgTankRules { LeoHdr h; uint8_t count; uint8_t r[6][6]; };   // alarm rules: on, level %, dir (0 rises to, 1 drops to), pattern, repeats, colour
 struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
@@ -92,6 +93,10 @@ struct __attribute__((packed)) MsgOtaAck   { LeoHdr h; uint8_t phase; uint32_t o
 struct RxItem { uint8_t mac[6]; uint8_t len; uint8_t data[250]; };
 enum TankState : uint8_t { T_NORMAL = 0, T_FULL = 1, T_LOW = 2, T_SENSOR = 3, T_BOOT = 4 };
 enum AlertKind : uint8_t { A_NONE = 0, A_FULL = 1, A_LOW = 2 };
+/* alarm rule: when the level RISES TO (dir 0) or DROPS TO (dir 1) `level` %, play `pattern` `repeats` times
+   and flash the level LEDs in `color`. Up to 6 rules, saved on the tank ("rules"). */
+struct AlarmRule { uint8_t on, level, dir, pattern, repeats, color; };
+struct Sound { uint16_t on, off; uint8_t count; uint16_t pause; };
 
 void leoTag(const uint8_t* key, uint32_t session, const uint8_t* body, size_t len, uint32_t ctr, uint8_t* out8) {
   uint8_t buf[264]; size_t n = 0;
@@ -166,9 +171,15 @@ uint8_t  goodStreak = 0, badStreak = 0;
 uint8_t  levelLeds = 0;                 // 0..ledCount
 int      ldrRaw = 0;
 TankState tstate = T_BOOT;
-AlertKind alertNow = A_NONE;            // alert currently sounding
-bool     armedFull = true, armedLow = true;
+AlertKind alertNow = A_NONE;            // alert currently sounding (A_FULL = a "rises to" rule, A_LOW = "drops to")
 uint8_t  alertRound = 0; uint32_t alertPhaseAt = 0; bool alertOn = false;
+// sounds: 0 chirp, 1 short beeps, 2 long beeps, 3 triple beep, 4 siren, 5 LEDs only (no sound)
+const Sound SOUNDS[6] = { {60, 0, 1, 1500}, {200, 300, 1, 0}, {500, 500, 1, 0}, {80, 80, 3, 800}, {1000, 300, 1, 0}, {400, 400, 1, 0} };
+// flash colours: 0 none, 1 green, 2 red, 3 blue, 4 white, 5 amber
+const uint8_t FLASH[6][3] = { {0, 0, 0}, {0, 255, 0}, {255, 0, 0}, {0, 0, 255}, {255, 255, 255}, {255, 140, 0} };
+AlarmRule rules[6] = { {1, 95, 0, 2, 10, 1}, {1, 10, 1, 1, 10, 2} };   // default = the old full and low alarms
+bool     ruleArmed[6] = { true, true, true, true, true, true };
+AlarmRule alertR; int8_t alertRule = -1; bool alertTest = false; uint8_t beepIdx = 0; uint32_t alertWait = 0;
 bool     silenced = false;              // button pressed during this alert
 
 /* ------------------------------ helpers ---------------------------- */
@@ -248,27 +259,46 @@ void ldrTick() {
 
 /* ------------------------------ alerts ----------------------------- */
 void buzzer(bool on) { digitalWrite(BUZZER_PIN, on ? HIGH : LOW); }
-void stopAlert() { alertNow = A_NONE; alertOn = false; buzzer(false); stateDirty = true; }
+void stopAlert() { alertNow = A_NONE; alertRule = -1; alertTest = false; alertOn = false; buzzer(false); stateDirty = true; }
+void startAlert(const AlarmRule& r, int8_t idx, bool test) {
+  alertR = r; alertRule = idx; alertTest = test; alertNow = (test || r.dir == 0) ? A_FULL : A_LOW;
+  alertRound = 0; beepIdx = 0; alertOn = false; alertPhaseAt = millis(); alertWait = 0; silenced = false; stateDirty = true;
+}
+bool ruleHit(const AlarmRule& r)   { return r.dir == 0 ? levelPct >= r.level : levelPct <= r.level; }
+bool ruleClear(const AlarmRule& r) { return r.dir == 0 ? levelPct < r.level - 5 : levelPct > r.level + 5; }   // re-arm 5 % back
 void alertTick() {
-  if (!sensorOk) { if (alertNow) stopAlert(); tstate = T_SENSOR; return; }
-  // re-arm once the level is back in the normal band
-  if (levelPct >= lowPct + 5 && levelPct <= fullPct - 5) { armedFull = armedLow = true; silenced = false; }
-  TankState s = levelPct >= fullPct ? T_FULL : levelPct <= lowPct ? T_LOW : T_NORMAL;
-  if (s != tstate) { tstate = s; stateDirty = true; }
-
-  if (!alertNow) {
-    if (s == T_FULL && armedFull) { alertNow = A_FULL; armedFull = false; }
-    else if (s == T_LOW && armedLow) { alertNow = A_LOW; armedLow = false; }
-    else return;
-    alertRound = 0; alertOn = false; alertPhaseAt = 0; silenced = false; stateDirty = true;
-    dbg(alertNow == A_FULL ? "ALERT: tank full" : "ALERT: tank low");
+  if (!sensorOk) {
+    if (alertNow && !alertTest) stopAlert();
+    tstate = T_SENSOR;
+  } else {
+    TankState s = levelPct >= fullPct ? T_FULL : levelPct <= lowPct ? T_LOW : T_NORMAL;
+    if (s != tstate) { tstate = s; stateDirty = true; }
+    for (int i = 0; i < 6; ++i) {
+      const AlarmRule& r = rules[i]; if (!r.on) continue;
+      if (ruleClear(r)) ruleArmed[i] = true;
+      if (!alertNow && ruleArmed[i] && ruleHit(r)) { ruleArmed[i] = false; startAlert(r, i, false); dbg("ALERT: rule " + String(i + 1) + " at " + String(levelPct, 0) + "%"); }
+    }
+    if (alertNow && !alertTest && alertRule >= 0) {
+      const AlarmRule& r = rules[alertRule];
+      if (silenced || !r.on || !ruleHit(r)) { stopAlert(); return; }      // silenced, rule changed, or level moved away
+    }
   }
-  if (silenced || (alertNow == A_FULL && s != T_FULL) || (alertNow == A_LOW && s != T_LOW)) { stopAlert(); return; }
-  uint32_t onMs = alertNow == A_FULL ? 500 : 200, offMs = alertNow == A_FULL ? 500 : 300;
-  if (millis() - alertPhaseAt < (alertOn ? onMs : offMs)) return;
+  if (!alertNow) return;
+  if (alertTest && silenced) { stopAlert(); return; }
+  const Sound& snd = SOUNDS[alertR.pattern < 6 ? alertR.pattern : 1];
+  if (millis() - alertPhaseAt < alertWait) return;
   alertPhaseAt = millis();
-  if (alertOn) { alertOn = false; buzzer(false); if (++alertRound >= ALERT_ROUNDS) stopAlert(); }
-  else { alertOn = true; buzzer(buzzerAllowed()); }      // quiet in a dark room or 22-06; LEDs still flash
+  if (alertOn) {
+    alertOn = false; buzzer(false);
+    if (++beepIdx >= snd.count) {
+      beepIdx = 0;
+      if (++alertRound >= (alertR.repeats ? alertR.repeats : 1)) { stopAlert(); return; }
+      alertWait = snd.off + snd.pause;
+    } else alertWait = snd.off;
+  } else {
+    alertOn = true; alertWait = snd.on;
+    buzzer(alertR.pattern != 5 && (alertTest || buzzerAllowed()));   // quiet in a dark room / quiet hours; LEDs still flash
+  }
 }
 
 /* ------------------------------ button ----------------------------- */
@@ -330,9 +360,13 @@ void ledTick() {
   } else if (millis() < btnFeedbackUntil) {
     for (int i = 0; i < ledCount; ++i) c[i] = scaled(128, 0, 128, max(br, 20));     // purple = button seen
   } else if (alertNow && alertOn) {
-    for (int i = 0; i < ledCount; ++i) c[i] = alertNow == A_FULL ? scaled(0, 255, 0, max(br, 20)) : scaled(255, 0, 0, max(br, 20));
+    const uint8_t* fc = FLASH[alertR.color < 6 ? alertR.color : 2];        // the rule's flash colour (none = dark)
+    for (int i = 0; i < ledCount; ++i) c[i] = scaled(fc[0], fc[1], fc[2], max(br, 20));
   } else if (sensorOk) {
     for (int i = 0; i < levelLeds && i < ledCount; ++i) { uint8_t r, g, b; gradColor(i, r, g, b); c[i] = scaled(r, g, b, br); }
+  } else if (millis() > 8000) {                          // ultrasonic sensor problem: all level LEDs blink yellow
+    bool on = (millis() / 500) % 2;
+    for (int i = 0; i < ledCount; ++i) c[i] = on ? scaled(255, 170, 0, max(br, (int)minBright)) : 0;
   }
   // LED 8: faint quick breath, same scheme as the LEO switch; red = sensor fault
   uint8_t r, g, b; uint32_t period;
@@ -380,8 +414,8 @@ void sendHello(const uint8_t* to) {
 const char* stateText() {
   if (otaActive) return "Updating firmware";
   if (!sensorOk) return tstate == T_BOOT ? "Starting" : "Sensor not connected";
-  if (alertNow == A_FULL) return silenced ? "Full (silenced)" : "FULL - alarm";
-  if (alertNow == A_LOW)  return silenced ? "Low (silenced)" : "LOW - alarm";
+  if (alertNow && alertTest) return "Testing sound";
+  if (alertNow) { static char t[24]; snprintf(t, sizeof(t), "Alarm %d: %s %d%%", alertRule + 1, alertR.dir ? "below" : "above", alertR.level); return t; }
   if (tstate == T_FULL) return "Full";
   if (tstate == T_LOW)  return "Low";
   return "Normal";
@@ -405,6 +439,11 @@ void sendDiag() {                       // chip details for the hub's Advanced v
   m.flashSize = ESP.getFlashChipSize(); m.sketchSize = ESP.getSketchSize(); m.sketchMax = ESP.getFreeSketchSpace();
   m.resetReason = (uint8_t)esp_reset_reason(); m.cpuMHz = (uint8_t)getCpuFrequencyMhz();
   copyStr(m.sdk, sizeof(m.sdk), ESP.getSdkVersion());
+  sendHub(&m, sizeof(m));
+}
+void sendTankRules() {                  // alarm rules for the web app
+  MsgTankRules m = {}; fillHdr(m.h, M_TANK_RULES); m.count = 6;
+  memcpy(m.r, rules, sizeof(m.r));
   sendHub(&m, sizeof(m));
 }
 void sendTankInfo() {                   // our settings, so the hub web app can show and edit them
@@ -461,11 +500,24 @@ void handleCmd(const MsgCmd& c) {
     case C_IDENTIFY: identifyUntil = millis() + 4000; break;
     case C_RENAME:   if (c.text[0]) { devName = String(c.text); prefs.putString("name", devName); } break;
     case C_REBOOT:   restartAt = millis() + 300; break;
-    case C_INFO:     stateDirty = true; sendTankInfo(); sendDiag(); break;
+    case C_INFO:     stateDirty = true; sendTankInfo(); sendTankRules(); sendDiag(); break;
     case C_UNPAIR:   forgetHub("hub asked us to forget it"); break;
     case C_TANK_SET: applySetting(c.idx, c.f); break;
     case C_SILENCE:  if (alertNow) { silenced = true; dbg("Alert silenced from the web app"); } break;
-    case C_BEEP:     buzzer(true); beepUntil = millis() + 150; break;
+    case C_BEEP:
+      if (c.idx >= 1 && c.idx <= 6) { if (!alertNow || alertTest) { AlarmRule t = { 1, 0, 0, (uint8_t)(c.idx - 1), 1, (uint8_t)(c.val < 6 ? c.val : 0) }; startAlert(t, -1, true); } }
+      else { buzzer(true); beepUntil = millis() + 150; }
+      break;
+    case C_TANK_RULE:
+      if (c.idx < 6) {
+        AlarmRule r; memcpy(&r, c.text, sizeof(r));
+        r.on = r.on ? 1 : 0; if (r.level > 100) r.level = 100; r.dir = r.dir ? 1 : 0;
+        if (r.pattern > 5) r.pattern = 1; if (r.repeats < 1) r.repeats = 1; if (r.repeats > 30) r.repeats = 30; if (r.color > 5) r.color = 2;
+        rules[c.idx] = r; ruleArmed[c.idx] = !ruleHit(r);              // don't fire at once for a level we're already at
+        if (alertRule == (int8_t)c.idx) stopAlert();
+        prefs.putBytes("rules", rules, sizeof(rules)); sendTankRules();
+        dbg("Rule " + String(c.idx + 1) + " saved");
+      } break;
     case C_FACTORY:  factoryReset("requested from the web app"); break;
   }
 }
@@ -489,7 +541,7 @@ void handleWelcome(const RxItem& it) {
   if (changed) { prefs.putBytes("hub", hubMac, 6); prefs.putUChar("ch", channel); }
   linked = true; linkedSince = millis(); lastVerified = millis();
   dbg("Linked to hub " + macStr(hubMac) + " (" + String(w.hubName) + ") on channel " + String(channel) + " - signed session");
-  sendState(); sendTankInfo(); sendDiag();
+  sendState(); sendTankInfo(); sendTankRules(); sendDiag();
 }
 
 void handlePacket(const RxItem& it) {
@@ -603,7 +655,10 @@ void setup() {
   ledCount = prefs.getUChar("leds", 7); if (ledCount < 1 || ledCount > MAX_LEVEL_LEDS) ledCount = 7;
   showFrom = prefs.getUChar("sf", showFrom) % 24; showTo = prefs.getUChar("st", showTo) % 24;
   minBright = prefs.getUChar("mb", minBright); if (minBright < 1 || minBright > 60) minBright = 6;
-  if (prefs.getBytesLength("cols") == sizeof(custom)) prefs.getBytes("cols", custom, sizeof(custom));  if (prefs.getBytes("hub", hubMac, 6) == 6) hubKnown = true;
+  if (prefs.getBytesLength("cols") == sizeof(custom)) prefs.getBytes("cols", custom, sizeof(custom));
+  if (prefs.getBytesLength("rules") == sizeof(rules)) prefs.getBytes("rules", rules, sizeof(rules));
+  else { rules[0].level = fullPct; rules[1].level = lowPct; }      // first start with rules: carry over the old full/low alarm levels
+  if (prefs.getBytes("hub", hubMac, 6) == 6) hubKnown = true;
   if (prefs.getBytes("key", key, 16) == 16) hasKey = true;
   uint8_t ch = prefs.getUChar("ch", 1);
 
