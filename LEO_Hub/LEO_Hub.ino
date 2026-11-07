@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "1.9.7"
+#define HUB_FW            "2.0.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -77,7 +77,8 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat; };   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat;
+                                              uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff; };   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
@@ -188,8 +189,19 @@ uint8_t bootGlowLevel() {
   if (t < BOOT_GLOW_MS - 300) return peak;
   return (uint8_t)(peak * (BOOT_GLOW_MS - t) / 300);
 }
-#define ROOM_LIT_ON   120                 // same dead band as the tank: lit above 120, dark again below 80
-#define ROOM_LIT_OFF  80
+/* GLOBAL home settings (Hub -> Home settings): stored on the hub and sent to every device in each keep-alive;
+   devices save the last values so they keep following them when the hub is off. Device-specific settings
+   (tank calibration, rules, colours, relays, touch pads...) stay on each device. */
+uint8_t  gQuietFrom = 22, gQuietTo = 7;  // no sounds between these hours (from == to: none)
+uint8_t  gDayFrom = 7, gDayTo = 18;      // daytime: displays may stay on dimly; clock fallback for day/night
+uint8_t  gLedDay = 5, gLedNight = 2;     // status light peak brightness (/255) in a bright / dark room
+uint16_t gLitOn = 120, gLitOff = 80;     // room counts as bright above gLitOn, dark again below gLitOff (tank LDR)
+bool     gInit = false;                  // copied once from the tank's own values when upgrading
+void globalsSave() {
+  prefs.putUChar("gqf", gQuietFrom); prefs.putUChar("gqt", gQuietTo); prefs.putUChar("gdf", gDayFrom); prefs.putUChar("gdt", gDayTo);
+  prefs.putUChar("gld", gLedDay); prefs.putUChar("gln", gLedNight); prefs.putUShort("glon", gLitOn); prefs.putUShort("gloff", gLitOff);
+  prefs.putBool("ginit", true); gInit = true;
+}
 uint32_t staDownSince = 0, lastStaTry = 0, lastPush = 0, restartAt = 0;
 bool     stateDirty = true;
 uint8_t  txSeq = 0;
@@ -787,6 +799,8 @@ String stateJson() {
   JsonObject h = d["hub"].to<JsonObject>();
   h["name"] = hubName; h["id"] = hubId; h["fw"] = HUB_FW;
   h["room"] = roomLight == 1 ? "bright" : roomLight == 0 ? "dark" : "unknown";
+  { JsonObject g = h["global"].to<JsonObject>(); g["quietFrom"] = gQuietFrom; g["quietTo"] = gQuietTo; g["dayFrom"] = gDayFrom; g["dayTo"] = gDayTo;
+    g["ledDay"] = gLedDay; g["ledNight"] = gLedNight; g["litOn"] = gLitOn; g["litOff"] = gLitOff; }
   if (pendingAt && millis() - pendingAt < 30000) h["pending"] = macStr(pendingMac);   // asking to join in the last 30 s
   h["wifi"] = (WiFi.status() == WL_CONNECTED); h["ip"] = WiFi.localIP().toString();
   h["ap"] = apUp ? apSsid() : String("");
@@ -973,6 +987,8 @@ static const char INDEX_HTML[] PROGMEM =
   "  </section>\n"
   "\n"
   "  <section class=\"page\" id=\"p-hub\">\n"
+  "    <h3>Home settings</h3>\n"
+  "    <div class=\"card\" id=\"homeset\"><div class=\"meta\">Loading…</div></div>\n"
   "    <h3>Night lock</h3>\n"
   "    <div class=\"card\">\n"
   "      <p class=\"note\" style=\"margin-top:0\">While the lock is active the hub refuses every <b>ON</b> command (turning things OFF still works). Every blocked attempt is recorded in Activity.</p>\n"
@@ -1103,7 +1119,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  const pm=$('#pairmsg');if(pm){if(h.pairing>0&&pairBase){const nw=S.devices.filter(d=>!pairBase.includes(d.mac));pm.innerHTML=nw.length?('✅ Added: '+nw.map(d=>'<b>'+esc(d.name)+'</b>').join(', ')):'Looking for new devices…'}else if(!h.pairing)pairBase=null}\n"
   "  if(page==='home')renderHome();\n"
   "  if(page==='devices')renderDevices();\n"
-  "  if(page==='hub')renderLock();\n"
+  "  if(page==='hub'){renderLock();renderHomeSet()}\n"
   "  if(page==='tank')renderTank();\n"
   "  if(page==='sw')renderSw();\n"
   "}\n"
@@ -1263,11 +1279,11 @@ static const char INDEX_HTML[] PROGMEM =
   "      <button class=\"btn\" ${on?'':'disabled'} onclick=\"tankBeep()\">Beep</button>\n"
   "      <button class=\"btn\" ${on?'':'disabled'} onclick=\"cmd(tankMac,3)\">Identify</button></div></div>`;\n"
   "  // settings form: rebuilt only when the tank reports new values and you are not typing in it\n"
-  "  const key=JSON.stringify(c||{})+d.name;\n"
+  "  const key=JSON.stringify(c||{})+d.name+JSON.stringify((S.hub||{}).global||{});\n"
   "  if(key===tsetKey||typing('#tset'))return;\n"
   "  tsetKey=key;\n"
   "  if(!c){$('#tset').innerHTML=`<div class=\"card\" style=\"margin-top:12px\"><div class=\"meta\">Waiting for the tank's settings… (tank firmware 1.4 or newer)</div></div>`;return}\n"
-  "  const showOn=c.showFrom!==c.showTo;\n"
+  "  const G=(S.hub||{}).global||{quietFrom:c.quietFrom,quietTo:c.quietTo,dayFrom:c.showFrom,dayTo:c.showTo};   // global home settings\n"
   "  $('#tset').innerHTML=`\n"
   "  <div data-tab=\"setup\">\n"
   "  <h3>Tank size (calibration)${q('How the tank turns the sensor distance into a percentage. The sensor sits at the top and measures down to the water: a SHORT distance means a FULL tank, a LONG distance means EMPTY. Fill the tank, wait a minute and press <b>Use now</b> next to Full; do the same for Empty when it is nearly empty. Then press Save.')}</h3>\n"
@@ -1292,9 +1308,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  <h3>Buzzer</h3>\n"
   "  <div class=\"card\">\n"
   "    <div class=\"switchrow\" style=\"margin-top:0\"><span>Buzzer${q('Turn the beeping off completely. The LEDs still flash for alarms and the app still shows them.')}</span><button class=\"tgl ${c.buzzer?'on':''}\" onclick=\"tankBuzzer(this)\"></button></div>\n"
-  "    <label style=\"margin-top:10px\">Buzzer quiet hours${q('No beeping between these times (for sleeping). The buzzer is also silent whenever the room is dark. Set both times the same to have no quiet hours.')}</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><div><select id=\"tQf\">${hrs(c.quietFrom)}</select></div><div><select id=\"tQt\">${hrs(c.quietTo)}</select></div></div>\n"
-  "    <div class=\"row\"><button class=\"btn\" onclick=\"saveQuiet()\">Save quiet hours</button></div>\n"
+  "    ${globalNote(`Quiet hours ${String(G.quietFrom).padStart(2,'0')}:00–${String(G.quietTo).padStart(2,'0')}:00 (no sounds)`)}\n"
   "  </div>\n"
   "  </div><div data-tab=\"display\">\n"
   "  <h3>LED display</h3>\n"
@@ -1309,11 +1323,9 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"row\" style=\"margin:0;align-items:center\"><input type=\"range\" min=\"0\" max=\"50\" value=\"${c.highlight}\" oninput=\"this.nextElementSibling.textContent=this.value+' %'\" onchange=\"tset(21,this.value);this.blur()\"><span class=\"meta\" style=\"flex:0 0 44px;text-align:right\">${c.highlight} %</span></div>`:''}\n"
   "    <label>LEDs used to show the level${q('How many LEDs, counted from the bottom of the strip, show the water level (1 to 8). A full tank lights all of them. The top LED is always the small status light.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tLeds\" type=\"number\" min=\"1\" max=\"8\" value=\"${c.ledCount||7}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveLeds()\">Save</button></div>\n"
-  "    <label style=\"margin-top:12px\">Daytime display${q('Normally the level LEDs follow the room light and go dark in a dark room. Between these times they always stay on, at least at the minimum brightness below, so you can see the level at a glance. Outside these times (night) they go dark in a dark room. Set both times the same to turn this off.')}</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><div><select id=\"tSf\">${hrs(c.showFrom)}</select></div><div><select id=\"tSt\">${hrs(c.showTo)}</select></div></div>\n"
-  "    <label>Minimum brightness (1–60)${q('How bright the level LEDs are at least during the daytime display. 1 is barely visible, 60 is clearly visible. In a bright room they can be brighter than this.')}</label>\n"
+  "    <label style=\"margin-top:12px\">Daytime minimum brightness (1–60)${q('During the daytime hours (a global setting) the level LEDs never go fully dark: they stay at least this bright, even in a dark room. 1 is barely visible, 60 is clearly visible.')}</label>\n"
   "    <div class=\"row\" style=\"margin:0\"><input id=\"tMb\" type=\"number\" min=\"1\" max=\"60\" value=\"${c.minBright||6}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveShow()\">Save</button></div>\n"
-  "    <p class=\"note\">${showOn?`Daytime display is on: ${String(c.showFrom).padStart(2,'0')}:00–${String(c.showTo).padStart(2,'0')}:00.`:'Daytime display is off.'}</p>\n"
+  "    ${globalNote(`Daytime hours ${String(G.dayFrom).padStart(2,'0')}:00–${String(G.dayTo).padStart(2,'0')}:00`)}\n"
   "  </div>\n"
   "  </div><div data-tab=\"setup\">\n"
   "  <h3>Status labels</h3>\n"
@@ -1348,7 +1360,6 @@ static const char INDEX_HTML[] PROGMEM =
   "  m.textContent='Saving…';\n"
   "  const ok=fp>c.fullPct?(await tset(3,fp)&&await tset(4,lp)):(await tset(4,lp)&&await tset(3,fp));\n"
   "  m.textContent=ok?'Sent — the tank confirms by showing the new values.':'Could not reach the hub.'}\n"
-  "async function saveQuiet(){if(await tset(6,$('#tQf').value)&&await tset(7,$('#tQt').value))toast('Quiet hours sent')}\n"
   "/* preset: bottom LED red (low), top LED blue (high), the ones between fade amber -> greens (fills the pickers; press Save) */\n"
   "function presetColors(){const els=[...document.querySelectorAll('#tset input[data-led]')].sort((a,b)=>a.dataset.led-b.dataset.led),n=els.length;\n"
   "  const stops=[[212,167,44],[150,190,60],[85,150,45],[110,220,120]],mix=(a,b,f)=>a.map((x,k)=>Math.round(x+(b[k]-x)*f)),hex=c=>'#'+c.map(x=>x.toString(16).padStart(2,'0')).join('');\n"
@@ -1359,7 +1370,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  toast(n?n+' colour'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
   "async function saveLeds(){const n=Math.round(+$('#tLeds').value);if(!(n>=1&&n<=8)){toast('Choose 1 to 8 LEDs');return}if(await tset(9,n))toast('Sent')}\n"
   "async function saveShow(){const b=Math.round(+$('#tMb').value);if(!(b>=1&&b<=60)){toast('Brightness must be 1 to 60');return}\n"
-  "  if(await tset(10,$('#tSf').value)&&await tset(11,$('#tSt').value)&&await tset(12,b))toast('Daytime display sent')}\n"
+  "  if(await tset(12,b))toast('Minimum brightness sent')}\n"
   "async function tankBuzzer(el){const on=!el.classList.contains('on');el.classList.toggle('on',on);if(!await tset(5,on?1:0))el.classList.toggle('on',!on)}\n"
   "async function tankSilence(){if(await cmd(tankMac,11))toast('Alarm silenced')}\n"
   "async function tankBeep(){if(await cmd(tankMac,12))toast('Beep!')}\n"
@@ -1383,7 +1394,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"kv\" style=\"margin-top:8px\"><span>Signal</span><b>${on?d.rssi+' dBm':'offline'}</b></div>\n"
   "    <div class=\"kv\"><span>Up</span><b>${up(d.uptime||0)}</b></div>\n"
   "    <div class=\"kv\"><span>Firmware</span><b>${esc(d.fw||'')}</b></div></div>`;\n"
-  "  const key=JSON.stringify(rl.map(r=>[r.name,r.watts,r.used,r.gpio]))+d.touch+d.name;\n"
+  "  const key=JSON.stringify(rl.map(r=>[r.name,r.watts,r.used,r.gpio]))+d.touch+d.name+JSON.stringify((S.hub||{}).global||{});\n"
   "  if(key===swKey||typing('#swset'))return;\n"
   "  swKey=key;\n"
   "  $('#swset').innerHTML=`\n"
@@ -1406,6 +1417,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"row\"><button class=\"btn\" onclick=\"cmd(swMac,3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart the switch? All relays turn OFF.'))cmd(swMac,6)\">Restart</button></div>\n"
   "    <div class=\"row\"><button class=\"btn\" onclick=\"nav('devices')\">Update firmware…</button><button class=\"btn d\" onclick=\"forget(swMac)\">Remove device…</button></div>\n"
   "    <p class=\"note\">Identify flashes the switch's LED so you can find it. Restart turns every relay off.</p>\n"
+  "    ${(S.hub||{}).global?globalNote(`Status light brightness ${S.hub.global.ledDay} (bright room) / ${S.hub.global.ledNight} (dark room)`):''}\n"
   "  </div></div>`;\n"
   "  applySub('sw');\n"
   "}\n"
@@ -1511,6 +1523,30 @@ static const char INDEX_HTML[] PROGMEM =
   "  if(await post('/api/factory',{confirm:'RESET'}))alert('The hub is resetting. Join the WiFi hotspot \"LEO-Hub-…\" (no password), then open http://192.168.4.1 to set it up again.')}\n"
   "async function clearActivity(){if(!confirm('Delete the whole activity log?'))return;if(await post('/api/clearactivity'))loadActivity()}\n"
   "async function clearConsole(){if(await post('/api/clearconsole'))$('#log').textContent=''}\n"
+  "\n"
+  "/* Hub -> Home settings: GLOBAL settings that apply to every device (each device keeps the last values it got) */\n"
+  "let homeKey='';\n"
+  "function renderHomeSet(){const box=$('#homeset'),g=(S.hub||{}).global;if(!box||!g)return;\n"
+  "  const key=JSON.stringify(g);if(key===homeKey||typing('#homeset'))return;homeKey=key;\n"
+  "  const tk=S.devices.find(d=>d.type==='tank'),ldr=tk&&tk.tank&&tk.tank.ldr!==undefined?tk.tank.ldr:null;\n"
+  "  box.innerHTML=`<p class=\"note\" style=\"margin-top:0\">These apply to <b>every</b> LEO device. Settings that depend on a device's hardware (tank size, alarm rules, colours, relays…) are on that device's page.</p>\n"
+  "    <label>Quiet hours — no sounds${q('No device makes a sound between these times (the tank\\'s alarm buzzer, for example). Sounds are also off whenever the room is dark. Set both the same for no quiet hours. Lights still show alarms.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><select id=\"gQf\">${hrs(g.quietFrom)}</select><select id=\"gQt\">${hrs(g.quietTo)}</select></div>\n"
+  "    <label>Daytime hours${q('The daytime part of the day for every device: the tank keeps its level LEDs on (dimly) during these hours even in a dark room, and when no room light reading is available the status lights use these hours to decide between day and night brightness.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><select id=\"gDf\">${hrs(g.dayFrom)}</select><select id=\"gDt\">${hrs(g.dayTo)}</select></div>\n"
+  "    <label>Status light brightness — bright room / dark room (1–40)${q('Peak brightness of the small breathing status light on every device (hub, switch, tank), out of 255. Keep these low so the lights are barely noticeable.')}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><input id=\"gLd\" type=\"number\" min=\"1\" max=\"40\" value=\"${g.ledDay}\"><input id=\"gLn\" type=\"number\" min=\"1\" max=\"40\" value=\"${g.ledNight}\"></div>\n"
+  "    <label>Room light — bright above / dark below${q('The tank\\'s light sensor is the room light sensor for every device. Above the first value the room counts as BRIGHT, below the second it counts as DARK again (the gap stops flicker at dusk). Higher numbers = more light needed.'+(ldr!=null?' The sensor reads <b>'+ldr+'</b> right now.':''))}</label>\n"
+  "    <div class=\"row\" style=\"margin:0\"><input id=\"gLon\" type=\"number\" min=\"10\" max=\"4000\" value=\"${g.litOn}\"><input id=\"gLoff\" type=\"number\" min=\"5\" max=\"3999\" value=\"${g.litOff}\"></div>\n"
+  "    ${ldr!=null?`<p class=\"note\">Room light now: <b>${ldr}</b> → ${esc(S.hub.room||'')}</p>`:''}\n"
+  "    <div class=\"row\"><button class=\"btn p\" onclick=\"saveHomeSet()\">Save home settings</button></div><div class=\"note\" id=\"homemsg\"></div>`}\n"
+  "async function saveHomeSet(){const v=id=>Math.round(+$(id).value),b={quietFrom:+$('#gQf').value,quietTo:+$('#gQt').value,dayFrom:+$('#gDf').value,dayTo:+$('#gDt').value,\n"
+  "    ledDay:v('#gLd'),ledNight:v('#gLn'),litOn:v('#gLon'),litOff:v('#gLoff')},m=$('#homemsg');\n"
+  "  if(!(b.ledDay>=1&&b.ledDay<=40&&b.ledNight>=1&&b.ledNight<=40)){m.textContent='Status light brightness must be 1–40.';return}\n"
+  "  if(!(b.litOff>=5&&b.litOn<=4000&&b.litOff<b.litOn)){m.textContent='\"Bright above\" must be higher than \"dark below\".';return}\n"
+  "  m.textContent=await post('/api/global',b)?'Saved — every device follows within a few seconds.':'Could not save.'}\n"
+  "/* read-only line for a device page: a global value, with where to change it */\n"
+  "function globalNote(txt){return `<p class=\"note\">${txt} — <a href=\"#\" onclick=\"nav('hub');return false\" style=\"color:var(--acc)\">change in Hub → Home settings</a> (applies to every device)</p>`}\n"
   "</script>\n"
   "</body>\n"
   "</html>\n"
@@ -1725,6 +1761,19 @@ void webBegin() {
     } else queueCmd(mac, cmd, idx, val, f, text.c_str());
     jsonOk(r);
   }));
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/global", [](AsyncWebServerRequest* r, JsonVariant& j) {   // Home settings
+    if (!guard(r)) return;
+    int qf = j["quietFrom"] | (int)gQuietFrom, qt = j["quietTo"] | (int)gQuietTo, df = j["dayFrom"] | (int)gDayFrom, dt = j["dayTo"] | (int)gDayTo;
+    int ld = j["ledDay"] | (int)gLedDay, ln = j["ledNight"] | (int)gLedNight, lon = j["litOn"] | (int)gLitOn, loff = j["litOff"] | (int)gLitOff;
+    if (qf < 0 || qf > 23 || qt < 0 || qt > 23 || df < 0 || df > 23 || dt < 0 || dt > 23 || ld < 1 || ld > 40 || ln < 1 || ln > 40 ||
+        lon < 10 || lon > 4000 || loff < 5 || loff >= lon) { r->send(400, "application/json", "{\"err\":\"range\"}"); return; }
+    gQuietFrom = qf; gQuietTo = qt; gDayFrom = df; gDayTo = dt; gLedDay = ld; gLedNight = ln; gLitOn = lon; gLitOff = loff;
+    globalsSave(); stateDirty = true;
+    char buf[160]; snprintf(buf, sizeof(buf), "Home settings: quiet %02d-%02d, daytime %02d-%02d, status light %d/%d, room bright above %d / dark below %d",
+                            qf, qt, df, dt, ld, ln, lon, loff);
+    activity(String(buf) + " (from " + who(r) + ")", false);
+    jsonOk(r);
+  }));
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/tankrule", [](AsyncWebServerRequest* r, JsonVariant& j) {
     if (!guard(r)) return;
     uint8_t mac[6]; if (!parseMac(j["mac"] | "", mac)) { r->send(400); return; }
@@ -1905,6 +1954,10 @@ void setup() {
   apPass  = prefs.getString("appass", "");
   if (apPass.length() < 8) { apPass = randomText(10); prefs.putString("appass", apPass); }   // unique per hub
   lockManual = prefs.getBool("lockM", false); lockSched = prefs.getBool("lockS", false);
+  gQuietFrom = prefs.getUChar("gqf", 22) % 24; gQuietTo = prefs.getUChar("gqt", 7) % 24; gDayFrom = prefs.getUChar("gdf", 7) % 24; gDayTo = prefs.getUChar("gdt", 18) % 24;
+  gLedDay = prefs.getUChar("gld", 5); gLedNight = prefs.getUChar("gln", 2); gLitOn = prefs.getUShort("glon", 120); gLitOff = prefs.getUShort("gloff", 80);
+  if (gLitOff >= gLitOn) { gLitOn = 120; gLitOff = 80; }
+  gInit = prefs.getBool("ginit", false);
   lockFrom = prefs.getInt("lockF", 23 * 60); lockTo = prefs.getInt("lockT", 6 * 60);
   tokensLoad();
   devsLoad();
@@ -1956,10 +2009,10 @@ void hubLedTick() {
   else if (millis() < pairingUntil)  { r = 0; g = 1; b = 1; period = 2000; }
   else                               { r = 0; g = 1; b = 0; period = 5000; }
   bool day = roomLight == 1;                                // room light from the tank's LDR ...
-  if (roomLight == 255 && timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); day = tm.tm_hour >= 7 && tm.tm_hour < 18; }   // ... else the clock
+  if (roomLight == 255 && timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); int m = tm.tm_hour * 60 + tm.tm_min, a = gDayFrom * 60, b = gDayTo * 60; day = a < b ? (m >= a && m < b) : (m >= a || m < b); }   // ... else the daytime hours
   uint32_t len = 800, t = millis() % period;                // quick breath: 0.8 s up and down, then dark
   float s = t < len ? sinf(PI * t / len) : 0;
-  uint8_t k = (uint8_t)(s * s * (day ? 5 : 2) + 0.5f);      // peak 5/255 in a lit room, 2/255 dark
+  uint8_t k = (uint8_t)(s * s * (day ? gLedDay : gLedNight) + 0.5f);   // global status-light brightness
   uint32_t c = ledA.Color(r * k, g * k, b * k);
   if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
 }
@@ -2014,6 +2067,8 @@ void loop() {
         MsgPing p = {}; fillHdr(p.h, M_PING); p.mins = -1; p.room = roomLight;
         if (timeValid()) { time_t now = time(nullptr); struct tm tm; localtime_r(&now, &tm); p.mins = tm.tm_hour * 60 + tm.tm_min; }
         p.beat = millis() % 10000;                             // edges breathe in step with the hub's LED
+        p.g = 1; p.quietFrom = gQuietFrom; p.quietTo = gQuietTo; p.dayFrom = gDayFrom; p.dayTo = gDayTo;   // global home settings
+        p.ledDay = gLedDay; p.ledNight = gLedNight; p.litOn = gLitOn; p.litOff = gLitOff;
         sendSigned(i, &p, sizeof(p));
       }
     }
@@ -2028,7 +2083,13 @@ void loop() {
         mask |= (1u << i);
         if (devs[i].type == DEV_TANK && devs[i].ldr != 0xFFFF) ldr = max(ldr, (int)devs[i].ldr);
       } }
-    uint8_t room = ldr < 0 ? 255 : (roomLight == 1 ? (ldr > ROOM_LIT_OFF ? 1 : 0) : (ldr > ROOM_LIT_ON ? 1 : 0));
+    if (!gInit) {                         // upgrading: start the Home settings from the tank's own quiet / daytime hours
+      bool got = false;
+      { DevGuard g; for (int i = 0; i < MAX_DEV; ++i) if (devs[i].used && devs[i].type == DEV_TANK && devs[i].tcfgKnown) {
+          gQuietFrom = devs[i].tQuietFrom; gQuietTo = devs[i].tQuietTo; gDayFrom = devs[i].tShowFrom; gDayTo = devs[i].tShowTo; got = true; break; } }
+      if (got) { globalsSave(); dbg("Home settings started from the tank's quiet / daytime hours"); stateDirty = true; }
+    }
+    uint8_t room = ldr < 0 ? 255 : (roomLight == 1 ? (ldr > gLitOff ? 1 : 0) : (ldr > gLitOn ? 1 : 0));
     if (room != roomLight) {
       dbg(String("Room light: ") + (room == 1 ? "bright" : room == 0 ? "dark" : "unknown (no tank) - using the clock") + (ldr >= 0 ? " (LDR " + String(ldr) + ")" : ""));
       roomLight = room; stateDirty = true;

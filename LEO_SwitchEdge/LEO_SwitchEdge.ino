@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.6.1-sw"
+#define EDGE_FW           "2.7.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -71,7 +71,8 @@ struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
-struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat; };   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat;
+                                              uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff; };   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
@@ -131,6 +132,8 @@ uint8_t scanStep = 0;
 int16_t  hubMins = -1; uint32_t hubMinsAt = 0;   // time of day from the hub; keeps running locally if the hub goes away
 uint8_t  hubRoom = 255; uint32_t hubRoomAt = 0;  // room light from the tank's LDR, via the hub (1 lit, 0 dark)
 uint8_t  savedRoom = 0;                           // last room light heard, kept in flash for the power-on glow
+uint8_t  ledDay = 5, ledNight = 2;                // global: status light peak in a bright / dark room ("ld" / "ln")
+uint8_t  dayFrom = 7, dayTo = 18;                 // global: daytime hours, used when no room light is known ("df" / "dt")
 /* Breathing sync: the hub sends its beat (millis() % 10000) in every keep-alive; we keep an
    offset so all LEO LEDs breathe on the same beat. Big jumps are taken at once, small radio
    jitter is smoothed. Without the hub we just keep breathing on our own clock.               */
@@ -383,10 +386,15 @@ void handlePacket(const RxItem& it) {
     if (blen >= sizeof(LeoHdr) + 2) {
       MsgPing p = {}; p.room = 255; memcpy(&p, it.data, min(blen, sizeof(p)));
       if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); }
-      if (blen >= sizeof(MsgPing)) beatSync(p.beat);
-      if (blen >= sizeof(MsgPing) && p.room != 255) {
+      if (blen >= offsetof(MsgPing, g)) beatSync(p.beat);
+      if (blen >= offsetof(MsgPing, beat) && p.room != 255) {
         hubRoom = p.room; hubRoomAt = millis();
         if (p.room != savedRoom) { savedRoom = p.room; prefs.putUChar("room", savedRoom); }   // for the next power-on glow
+      }
+      if (blen >= sizeof(MsgPing) && p.g == 1) {          // GLOBAL home settings: status light brightness + daytime hours
+        if (p.ledDay >= 1 && p.ledDay <= 40 && p.ledDay != ledDay) { ledDay = p.ledDay; prefs.putUChar("ld", ledDay); }
+        if (p.ledNight >= 1 && p.ledNight <= 40 && p.ledNight != ledNight) { ledNight = p.ledNight; prefs.putUChar("ln", ledNight); }
+        if (p.dayFrom < 24 && p.dayTo < 24 && (p.dayFrom != dayFrom || p.dayTo != dayTo)) { dayFrom = p.dayFrom; dayTo = p.dayTo; prefs.putUChar("df", dayFrom); prefs.putUChar("dt", dayTo); }
       }
     }
     return;
@@ -446,7 +454,8 @@ float daylight() {                                   // 1 = room lit / day, 0 = 
   if (hubRoom != 255 && millis() - hubRoomAt < 60000) return hubRoom ? 1 : 0;
   if (hubMins < 0 || millis() - hubMinsAt > 24UL * 3600 * 1000) return 0;
   int m = (hubMins + (int)((millis() - hubMinsAt) / 60000)) % 1440;
-  return (m >= 7 * 60 && m < 18 * 60) ? 1 : 0;
+  int a = dayFrom * 60, b = dayTo * 60;
+  return (a < b ? (m >= a && m < b) : (m >= a || m < b)) ? 1 : 0;
 }
 uint8_t breathLevel(uint32_t period, uint8_t peak) { // quick sine breath at the start of each period
   uint32_t len = period < 1000 ? period * 4 / 5 : 800, t = beatMillis() % period;   // on the hub's beat
@@ -482,7 +491,7 @@ void ledTick() {
     else if (linked)    { r = 0; g = 1; b = 0; period = 5000; }
     else if (hasKey)    { r = 1; g = 1; b = 0; period = 2000; }
     else                { r = 0; g = 0; b = 1; period = 2000; }
-    uint8_t k = breathLevel(period, daylight() > 0.5f ? 5 : 2);
+    uint8_t k = breathLevel(period, daylight() > 0.5f ? ledDay : ledNight);   // global status-light brightness
     c = pix.Color(r * k, g * k, b * k);
   }
   if (c != shown) { shown = c; pix.setPixelColor(0, c); pix.show(); }   // only talk to the LED when it changes
@@ -503,6 +512,8 @@ void setup() {
   // room light we last heard (saved), because after a power cut we don't know if it is day or night yet.
   prefs.begin("leoedge", false);
   savedRoom = prefs.getUChar("room", 0);          // never told -> assume dark (dim)
+  ledDay = prefs.getUChar("ld", 5); ledNight = prefs.getUChar("ln", 2); if (!ledDay || ledDay > 40) ledDay = 5; if (!ledNight || ledNight > 40) ledNight = 2;
+  dayFrom = prefs.getUChar("df", 7) % 24; dayTo = prefs.getUChar("dt", 18) % 24;
   pix.begin(); pix.setBrightness(255);            // ledTick() sets the real (low) levels
   bootGlowShow();
   rxq = xQueueCreate(16, sizeof(RxItem));
