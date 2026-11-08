@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.5.1"
+#define HUB_FW            "2.5.2"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -1904,7 +1904,13 @@ static const char INDEX_HTML[] PROGMEM =
   "  if(which===0&&+lo.value>+hi.value-2)lo.value=+hi.value-2;if(which===1&&+hi.value<+lo.value+2)hi.value=+lo.value+2;\n"
   "  const f=c.querySelector('.dfill');f.style.left=(+lo.value/(N-1)*100)+'%';f.style.right=(100-+hi.value/(N-1)*100)+'%';\n"
   "  const t0=+c.dataset.t0,st=+c.dataset.step,wk=c.dataset.week==='1';c.querySelector('[data-k=za]').textContent=zTime(t0+lo.value*st,wk);\n"
-  "  c.querySelector('[data-k=zb]').textContent=+hi.value>=N-1&&!wk?'now':zTime(t0+hi.value*st,wk)}\n"
+  "  c.querySelector('[data-k=zb]').textContent=+hi.value>=N-1&&!wk?'now':zTime(t0+hi.value*st,wk);\n"
+  "  // show the selection on the chart while dragging: a line at each end, everything outside dimmed\n"
+  "  const svg=c.parentElement.querySelector('svg'),sel=svg&&svg.querySelector('.zsel');if(!sel)return;\n"
+  "  const [x0,x1]=c.dataset.gx.split(',').map(Number),za=+c.dataset.za,vn=+c.dataset.vn,X=i=>Math.max(x0,Math.min(x1,x0+(x1-x0)*(i-za)/Math.max(1,vn-1)));\n"
+  "  const a=X(+lo.value),b=X(+hi.value);sel.setAttribute('visibility','visible');\n"
+  "  const s0=sel.querySelector('.zs0'),s1=sel.querySelector('.zs1');s0.setAttribute('x',x0);s0.setAttribute('width',Math.max(0,a-x0));s1.setAttribute('x',b);s1.setAttribute('width',Math.max(0,x1-b));\n"
+  "  for(const [cl,x] of [['.zl0',a],['.zl1',b]]){const l=sel.querySelector(cl);l.setAttribute('x1',x);l.setAttribute('x2',x)}}\n"
   "function zSet(el){const c=el.closest('.zoomc'),N=+c.dataset.n,lo=+c.querySelector('.dlo').value,hi=+c.querySelector('.dhi').value;el.blur();\n"
   "  chartZ[c.dataset.k]=[lo/(N-1),hi/(N-1)];chartDrawn='';loadChart(c.dataset.mac,c.dataset.box,c.dataset.unit)}\n"
   "function zReset(a){const c=a.closest('.zoomc');chartZ[c.dataset.k]=null;chartDrawn='';loadChart(c.dataset.mac,c.dataset.box,c.dataset.unit)}\n"
@@ -1964,8 +1970,10 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"cst\">${stats.map(([k,val])=>`<div><span>${k}</span><b>${val}</b></div>`).join('')}</div></div>${btns}\n"
   "    <svg viewBox=\"0 0 ${W} ${H}\" width=\"100%\" style=\"display:block;touch-action:pan-y;margin-top:6px\"><defs><linearGradient id=\"${gid}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"${col}\" stop-opacity=\".45\"/><stop offset=\"1\" stop-color=\"${col}\" stop-opacity=\"0\"/></linearGradient></defs>\n"
   "    ${g}<path d=\"${area}\" fill=\"url(#${gid})\"/><path class=\"${anim?'cl':''}\" d=\"${line}\" fill=\"none\" stroke=\"${col}\" stroke-width=\"2.2\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/><g fill=\"${col}\">${dots}</g>${liveDot}\n"
+  "    <g class=\"zsel\" visibility=\"hidden\"><rect class=\"zs0\" y=\"${pt}\" height=\"${H-pt-pb}\" fill=\"#0c0f12\" opacity=\".65\"/><rect class=\"zs1\" y=\"${pt}\" height=\"${H-pt-pb}\" fill=\"#0c0f12\" opacity=\".65\"/>\n"
+  "      <line class=\"zl0\" y1=\"${pt-4}\" y2=\"${H-pb}\" stroke=\"var(--acc)\" stroke-width=\"2\"/><line class=\"zl1\" y1=\"${pt-4}\" y2=\"${H-pb}\" stroke=\"var(--acc)\" stroke-width=\"2\"/></g>\n"
   "    <line class=\"cx\" y1=\"${pt}\" y2=\"${H-pb}\" stroke=\"#8b98a4\" stroke-dasharray=\"2 3\" visibility=\"hidden\"/><circle class=\"cd\" r=\"4.5\" fill=\"${col}\" stroke=\"#fff\" stroke-width=\"1.5\" visibility=\"hidden\"/></svg>\n"
-  "    ${full>3?`<div class=\"zoomc\" data-k=\"${zk}\" data-t0=\"${ft0}\" data-step=\"${step}\" data-n=\"${full}\" data-week=\"${week?1:0}\" data-mac=\"${mac}\" data-box=\"${box}\" data-unit=\"${unit}\">\n"
+  "    ${full>3?`<div class=\"zoomc\" data-k=\"${zk}\" data-t0=\"${ft0}\" data-step=\"${step}\" data-n=\"${full}\" data-week=\"${week?1:0}\" data-mac=\"${mac}\" data-box=\"${box}\" data-unit=\"${unit}\" data-za=\"${za}\" data-vn=\"${n}\" data-gx=\"${pl},${W-pr},${W}\">\n"
   "      <div class=\"dtrk\"><div class=\"dfill\" style=\"left:${za/(full-1)*100}%;right:${100-zb/(full-1)*100}%\"></div>\n"
   "      <input type=\"range\" class=\"dlo\" min=\"0\" max=\"${full-1}\" value=\"${za}\" oninput=\"zIn(this,0)\" onchange=\"zSet(this)\"><input type=\"range\" class=\"dhi\" min=\"0\" max=\"${full-1}\" value=\"${zb}\" oninput=\"zIn(this,1)\" onchange=\"zSet(this)\"></div>\n"
   "      <div class=\"zlab\"><span data-k=\"za\">${zTime(ft0+za*step,week)}</span>${zoomed?`<a href=\"#\" onclick=\"zReset(this);return false\">⤢ Show all</a>`:'<span class=\"meta\">drag the ends to zoom in</span>'}<span data-k=\"zb\">${atEnd&&!week?'now':zTime(ft0+zb*step,week)}</span></div></div>`:''}\n"
