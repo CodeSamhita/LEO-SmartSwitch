@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.5.5"
+#define HUB_FW            "2.5.6"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -1184,6 +1184,7 @@ static const char INDEX_HTML[] PROGMEM =
   ".dtrk input[type=range]::-moz-range-thumb{pointer-events:auto;width:18px;height:18px;border-radius:50%;background:var(--acc);border:3px solid var(--s1);cursor:pointer}\n"
   ".dnums{display:flex;justify-content:space-between;gap:10px;margin-top:4px}.dnums label{margin:0;font-size:11.5px}.dnums span{display:flex;align-items:center;gap:4px;margin-top:3px;color:var(--mut);font-size:12px}\n"
   "body.devpage nav{display:none}body.devpage .savebar{bottom:calc(12px + env(safe-area-inset-bottom))}body.devpage .toast{bottom:calc(16px + env(safe-area-inset-bottom))}body.devpage .wrap{padding-bottom:80px}\n"
+  ".gmid .gauto{display:none}.gmid.glinked .gauto{display:inline}.gmid.glinked .slr{opacity:.5}\n"
   ".zoomc{margin:2px 0 4px}.zlab{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--mut);margin-top:-2px}.zlab a{color:var(--acc);font-weight:650;text-decoration:none}\n"
   ".why{background:var(--s2);border-radius:10px;padding:9px 11px;font-size:12.5px;line-height:1.5;margin-top:10px}\n"
   "fieldset{border:0;padding:0;margin:0;min-width:0}fieldset:disabled{opacity:.45}\n"
@@ -1597,7 +1598,14 @@ static const char INDEX_HTML[] PROGMEM =
   "  const strip=[...Array(n)].map((_,i)=>{const on=i<lit,k=(i===lit-1?ta:tb)*gn(i),col=ledCol(cc,i,n);return `<i style=\"height:12px;background:${on?col:'#1d2630'};opacity:${on?Math.max(.12,k/255).toFixed(2):1};${on&&i===lit-1&&h?'box-shadow:0 0 7px '+col:''}\"></i>`}).join('');\n"
   "  el.innerHTML=`<div style=\"display:flex;gap:14px;align-items:center\"><span class=\"strip\" style=\"width:32px\">${strip}</span><div>Example — water at 60 %: <b>${lit} of ${n}</b> LEDs lit (each LED ≈ ${Math.round(100/n)} % of the tank).<br>\n"
   "    In full daylight the top lit LED is <b>${ta}</b> and the LEDs below it <b>${tb}</b> (of 255).${h?'':'<br>0 % = all lit LEDs equally bright.'}<br><span class=\"meta\">In a dimmer room both scale down together.</span></div></div>`}\n"
-  "window.on_tHl=window.on_tLeds=()=>hlInfo();for(let i=0;i<8;i++)window['on_tG'+i]=()=>hlInfo();\n"
+  "window.on_tHl=window.on_tLeds=()=>hlInfo();for(let i=0;i<8;i++)window['on_tG'+i]=()=>{if(gLink)gInterp(i);hlInfo()};\n"
+  "/* Link: LED 1 and LED n-1 set the ends; the LEDs between follow on a straight line (the top LED stays separate) */\n"
+  "let gLink=false;\n"
+  "function gCount(){return [...document.querySelectorAll('input[type=range][id^=tG]')].length}\n"
+  "function gInterp(i){const n=gCount();if(n<4||(i!==0&&i!==n-2&&i!==-1))return;const a=+$('#tG0').value,b=+$('#tG'+(n-2)).value;\n"
+  "  for(let j=1;j<=n-3;j++){const r=$('#tG'+j),v=Math.round(a+(b-a)*j/(n-2));if(+r.value!==v){r.value=v;slShow(r);stage(r)}}}\n"
+  "function gApply(){document.querySelectorAll('.gmid').forEach(d=>{d.querySelectorAll('input').forEach(x=>x.disabled=gLink);d.classList.toggle('glinked',gLink)})}\n"
+  "function gLinkSet(){gLink=!gLink;const t=$('#gLinkT');if(t)t.classList.toggle('on',gLink);gApply();if(gLink){gInterp(-1);hlInfo()}}\n"
   "function tankLive(){const t=(tankDev()||{}).tank||{},mb=tcfg().minBright||6,s=(id,v)=>{const e=$(id);if(e)e.innerHTML=v};\n"
   "  if(t.ldr!=null){const b=ldrBr(t.ldr);s('#ldrNow',`${inDay()&&b<mb?mb:b} / 255`);s('#ldrRaw',`${t.ldr} / 4095`)}\n"
   "  s('#ldr24',t.ldrLo!=null?`${t.ldrLo} / ${t.ldrHi}`:'collecting…');hlInfo();bzWhen();brWhy()}\n"
@@ -1727,7 +1735,8 @@ static const char INDEX_HTML[] PROGMEM =
   "    ${c.gain?`<label>Top lit LED (the current level) stands out by</label>\n"
   "    ${sl('tHl',0,100,c.highlight,'pct','tset(21,this.value)',60)}\n"
   "    <label style=\"margin-top:14px\">Brightness of each LED (% of normal)</label>\n"
-  "    ${[...Array(c.ledCount||7)].map((_,k)=>{const n=c.ledCount||7,i=n-1-k;return `<div class=\"lab2\" style=\"margin-top:6px\"><span><span class=\"rdot\" style=\"background:${ledCol(c,i,n)}\"></span>LED ${i+1}${i==0?' (bottom)':i==n-1?' (top)':''}</span></div>${sl('tG'+i,10,100,c.gain[i],'pct','tset('+(22+i)+',this.value)')}`}).join('')}`:''}\n"
+  "    ${(c.ledCount||7)>=4?`<div class=\"switchrow\" style=\"margin:4px 0 6px\"><span>Link LED 1 → LED ${(c.ledCount||7)-1}: fill the ones in between evenly</span><button class=\"tgl ${gLink?'on':''}\" id=\"gLinkT\" onclick=\"gLinkSet()\"></button></div>`:''}\n"
+  "    ${[...Array(c.ledCount||7)].map((_,k)=>{const n=c.ledCount||7,i=n-1-k;return `<div class=\"${i>0&&i<n-2?'gmid':''}\"><div class=\"lab2\" style=\"margin-top:6px\"><span><span class=\"rdot\" style=\"background:${ledCol(c,i,n)}\"></span>LED ${i+1}${i==0?' (bottom)':i==n-1?' (top)':''}${i>0&&i<n-2?'<span class=\"meta gauto\"> · auto</span>':''}</span></div>${sl('tG'+i,10,100,c.gain[i],'pct','tset('+(22+i)+',this.value)')}</div>`}).join('')}`:''}\n"
   "    <div class=\"why\" id=\"hlInfo\"></div>\n"
   "  </div>\n"
   "  </div><div data-tab=\"bright\">\n"
@@ -1764,7 +1773,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"row\"><button class=\"btn\" onclick=\"if(confirm('Restart the tank monitor?'))cmd(tankMac,6)\">Restart</button><button class=\"btn\" onclick=\"nav('devices')\">Update firmware…</button></div>\n"
   "    <div class=\"row\"><button class=\"btn d\" onclick=\"forget(tankMac)\">Remove device…</button></div>\n"
   "  </div></div>`;\n"
-  "  applySub('tank');tankLive();\n"
+  "  applySub('tank');tankLive();gApply();\n"
   "}\n"
   "function useNow(sel){const t=(tankDev()||{}).tank||{};if(t.sensorOk===false){toast('No sensor reading right now');return}$(sel).value=(t.dist||0).toFixed(1)}\n"
   "async function saveCal(){const d=tankDev(),c=d.tank.cfg,f=+$('#tFull').value,e=+$('#tEmpty').value,m=$('#calmsg');\n"
