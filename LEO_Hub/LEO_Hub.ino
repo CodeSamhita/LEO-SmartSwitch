@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.6.0"
+#define HUB_FW            "2.7.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -72,7 +72,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15, C_LEDTEST = 16 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -208,6 +208,7 @@ uint8_t  gLedStyle = 0;                  // status light: 0 breath, 1 blink, 2 d
 uint16_t gLedPeriod = 5000;              // ... repeats every (ms; 1000/2000/2500/5000/10000 so every device stays in step)
 uint8_t  gOk[3] = { 0, 255, 0 };         // ... colour when all is well (warnings keep their own colours)
 uint8_t  gMin[3] = { 1, 1, 1 };          // colour calibration: lowest R/G/B value while that colour is lit (all LEDs, all devices)
+uint32_t hubTestUntil = 0; uint8_t hubTestCol[3] = { 255, 255, 255 }, hubTestMin[3] = { 1, 1, 1 }, hubTestK = 5;   // LED calibration test
 uint16_t gPriceDay = 616, gPriceNight = 616;   // electricity price, paise per kWh, in / outside the daytime hours (BESCOM LT domestic: Rs 5.80 + 36 p surcharge)
 bool     gInit = false;                  // copied once from the tank's own values when upgrading
 bool okPeriod(int p) { return p == 1000 || p == 2000 || p == 2500 || p == 5000 || p == 10000; }
@@ -1247,9 +1248,15 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"card\" id=\"actlist\"><div class=\"meta\">Loading…</div></div>\n"
   "  </section>\n"
   "\n"
+  "  <section class=\"page\" id=\"p-cal\">\n"
+  "    <div class=\"tophead\" style=\"display:flex\"><button onclick=\"nav('hub')\">‹</button><b>LED colour calibration</b></div>\n"
+  "    <div class=\"card\" id=\"calbox\"></div>\n"
+  "  </section>\n"
+  "\n"
   "  <section class=\"page\" id=\"p-hub\">\n"
   "    <h3>Home settings</h3>\n"
   "    <div class=\"card\" id=\"homeset\"><div class=\"meta\">Loading…</div></div>\n"
+  "    <div class=\"card slist\" style=\"margin-top:12px\"><button class=\"srow\" onclick=\"nav('cal')\"><span class=\"ic\">🎨</span><span class=\"t\">LED colour calibration</span><span class=\"meta\">lights every LED to test</span><span class=\"chev\">›</span></button></div>\n"
   "    <h3>Night lock</h3>\n"
   "    <div class=\"card\">\n"
   "      <p class=\"note\" style=\"margin-top:0\">Blocks turning things ON. OFF always works.</p>\n"
@@ -1376,8 +1383,8 @@ static const char INDEX_HTML[] PROGMEM =
   "function restoreRoute(){if(routed)return;routed=true;const [p,m,s]=location.hash.slice(1).split('/');\n"
   "  if(p==='tank'||p==='sw'){const d=S.devices.find(x=>x.mac===m)||S.devices.find(x=>x.type===(p==='tank'?'tank':'switch'));if(!d)return;\n"
   "    if(p==='tank')tankMac=d.mac;else swMac=d.mac;subSel[p]=s||'ov';nav(p)}\n"
-  "  else if(['devices','activity','hub'].includes(p))nav(p)}\n"
-  "function nav(p){if(p!==page&&!leaveOk())return;if(p!==page)simStop(true);page=p;document.body.classList.toggle('devpage',p==='tank'||p==='sw');   // device pages: no bottom bar (they have ‹ back)\n"
+  "  else if(['devices','activity','hub','cal'].includes(p))nav(p)}\n"
+  "function nav(p){if(p!==page&&!leaveOk())return;if(p!==page)simStop(true);if(page==='cal'&&p!=='cal')calStop();page=p;document.body.classList.toggle('devpage',p==='tank'||p==='sw'||p==='cal');if(p==='cal')setTimeout(renderCal,0);   // device pages: no bottom bar (they have ‹ back)\n"
   "$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
   "  $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));\n"
   "  if(p==='devices'){devKeys='';render()} if(p==='hub'){loadHub();logOn()}else logOff(); if(p==='activity')loadActivity();\n"
@@ -1648,7 +1655,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function simStop(quiet){if(!simOn)return;simOn=false;clearTimeout(simT);simUi();\n"
   "  if(quiet)fetch('/api/cmd',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({mac:tankMac,cmd:10,idx:44,f:0})}).catch(()=>{});\n"
   "  else tset(44,0).then(()=>toast('Simulation stopped'))}\n"
-  "addEventListener('pagehide',()=>simStop(true));document.addEventListener('visibilitychange',()=>{if(document.hidden)simStop(true)});\n"
+  "addEventListener('pagehide',()=>{simStop(true);calStop()});document.addEventListener('visibilitychange',()=>{if(document.hidden){simStop(true);calStop()}else if(page==='cal'&&!calOn)renderCal()});\n"
   "function hrs(v){return [...Array(24)].map((_,h)=>`<option value=\"${h}\" ${h==v?'selected':''}>${h12(h)}</option>`).join('')}\n"
   "/* the tank bar in the app looks like the real strip: same number of level LEDs, same colours, yellow when the sensor fails */\n"
   "function ledCol(c,i,n){if(c&&c.palette==2&&c.colors&&c.colors[i])return c.colors[i];if(c&&c.palette==3)return 'hsl('+Math.round((n>1?i/(n-1):1)*240)+',100%,50%)';const t=n>1?i/(n-1):1,r=Math.round(255*(1-t)),v=Math.round(255*t);\n"
@@ -2071,9 +2078,6 @@ static const char INDEX_HTML[] PROGMEM =
   "  <div class=\"hs\"><h4>◉ Status light <span id=\"slp\" style=\"width:18px;height:18px;border-radius:50%;display:inline-block;box-shadow:0 0 0 1px var(--line)\"></span></h4>\n"
   "    <div class=\"row\" style=\"margin:0\"><select id=\"gLs\">${opts(['Breath','Blink','Double blink','Steady','Off'],g.ledStyle||0)}</select><select id=\"gLp\">${[1000,2000,2500,5000,10000].map(p=>`<option value=\"${p}\" ${p==(g.ledPeriod||5000)?'selected':''}>every ${p/1000} s</option>`).join('')}</select></div>\n"
   "    <div class=\"row\" style=\"margin-top:8px;align-items:center\"><input type=\"color\" id=\"gOk\" value=\"${g.okColor||'#00ff00'}\" style=\"flex:0 0 52px;height:34px;padding:2px\">${['#00ff00','#00ffff','#0000ff','#ffffff','#ff8c1a','#ff00ff'].map(x=>`<button class=\"btn\" style=\"flex:0 0 34px;height:34px;padding:0;background:${x}\" onclick=\"$('#gOk').value='${x}'\"></button>`).join('')}</div></div>\n"
-  "  <div class=\"hs\"><h4>🎨 LED colour calibration</h4>\n"
-  "    <div class=\"meta\">When an LED is dim, a colour can drop out (e.g. warm white turns orange). Raise that colour's minimum until it stays. Applies to every LED on every device.</div>\n"
-  "    ${[['minR','Red','#ff4d4d'],['minG','Green','#4dff7a'],['minB','Blue','#4d7bff']].map(([k,n,c])=>`<div class=\"lab\"><span><span class=\"rdot\" style=\"background:${c}\"></span>${n} never below</span></div>${sl('g'+k,0,80,g[k]!=null?g[k]:1,'cal','',90)}`).join('')}</div>\n"
   "  <div class=\"hs\"><h4>◐ Room light <span class=\"meta\" id=\"rlNow\"></span></h4>\n"
   "    <div class=\"meter\" id=\"rlMeter\"></div>\n"
   "    <div class=\"lab\"><span>Dark below</span></div>${sl('gDark',0,100,Math.round(Math.sqrt(g.litOff/4095)*100),'dark','',80)}</div>\n"
@@ -2094,13 +2098,36 @@ static const char INDEX_HTML[] PROGMEM =
   "  el.style.background=$('#gOk').value;el.style.opacity=0.08+0.92*k}requestAnimationFrame(slAnim)})();\n"
   "async function saveHomeSet(){const v=id=>Math.round(+$(id).value),dk=sq2ldr(+$('#gDark').value),mute=$('#gMute').classList.contains('on'),qf=+$('#gQf').value;\n"
   "  const b={quietFrom:qf,quietTo:mute?+$('#gQt').value:qf,dayFrom:+$('#gDf').value,dayTo:+$('#gDt').value,ledDay:v('#gLd'),ledNight:v('#gLn'),\n"
-  "    litOff:dk,litOn:Math.min(4095,dk+Math.max(10,Math.round(dk*0.3))),ledStyle:+$('#gLs').value,ledPeriod:+$('#gLp').value,okColor:parseInt($('#gOk').value.slice(1),16),minR:v('#gminR'),minG:v('#gminG'),minB:v('#gminB')},m=$('#homemsg');\n"
+  "    litOff:dk,litOn:Math.min(4095,dk+Math.max(10,Math.round(dk*0.3))),ledStyle:+$('#gLs').value,ledPeriod:+$('#gLp').value,okColor:parseInt($('#gOk').value.slice(1),16)},m=$('#homemsg');\n"
   "  if(mute&&b.quietFrom===b.quietTo){m.textContent='Night start and end must differ.';return}\n"
   "  const ok=await post('/api/global',b);\n"
   "  if(ok){homeEdit=false;homeKey='';renderHomeSet();toast('Home settings saved')}else m.textContent='Could not save.'}\n"
   "async function homeDefaults(){if(!confirm('Reset home settings to defaults?'))return;\n"
   "  const ok=await post('/api/global',{quietFrom:22,quietTo:7,dayFrom:7,dayTo:19,ledDay:5,ledNight:2,litOn:120,litOff:80,ledStyle:0,ledPeriod:5000,okColor:0x00ff00,minR:1,minG:1,minB:1});\n"
   "  homeEdit=false;homeKey='';renderHomeSet();toast(ok?'Defaults restored':'Could not save')}\n"
+  "/* LED colour calibration screen: while it is open every LED on every device shows the test colour, day or night;\n"
+  "   the minimums change the real LEDs live. Save keeps them, Cancel / leaving stops the test and restores normal. */\n"
+  "let calOn=false,calT=null,calKeep=null;\n"
+  "const CALCOL=[['#ffffff','White'],['#ffb070','Warm white'],['#00ffff','Cyan'],['#ffff00','Yellow'],['#ff00ff','Magenta'],['#ff8c1a','Orange']];\n"
+  "function renderCal(){const g=(S.hub||{}).global||{},el=$('#calbox');if(!el)return;\n"
+  "  el.innerHTML=`<div class=\"why\" style=\"margin-top:0\">While this screen is open, <b>every LED on every device</b> (hub, switch, tank) lights up in the test colour below — also at night. Make it dim, then raise a colour's minimum until it no longer drops out.</div>\n"
+  "    <label>Test colour</label><div class=\"row\" style=\"margin:0;flex-wrap:wrap;gap:6px\">${CALCOL.map(([c,n],i)=>`<button class=\"btn ${i?'':'p'}\" data-c=\"${c}\" title=\"${n}\" style=\"flex:0 0 40px;height:34px;padding:0;background:${c};${i?'':'box-shadow:0 0 0 2px var(--acc)'}\" onclick=\"calPick(this)\"></button>`).join('')}\n"
+  "      <input type=\"color\" id=\"cCol\" value=\"#ffffff\" style=\"flex:0 0 52px;height:34px;padding:2px\" oninput=\"calSend()\"></div>\n"
+  "    <label>Test brightness</label>${sl('cK',1,60,5,'b255','',130)}\n"
+  "    ${[['minR','Red','#ff4d4d'],['minG','Green','#4dff7a'],['minB','Blue','#4d7bff']].map(([k,n,c])=>`<div class=\"lab2\"><span><span class=\"rdot\" style=\"background:${c}\"></span>${n} never below</span></div>${sl('c'+k,0,80,g[k]!=null?g[k]:1,'cal','',90)}`).join('')}\n"
+  "    <div class=\"why\" id=\"calNow\"></div>\n"
+  "    <div class=\"row\"><button class=\"btn p\" onclick=\"calSave()\">Save</button><button class=\"btn\" onclick=\"calCancel()\">Cancel</button></div>`;\n"
+  "  calKeep=[g.minR,g.minG,g.minB];calOn=true;calSend();clearInterval(calT);calT=setInterval(()=>{if(calOn)calSend()},60000)}\n"
+  "function calVals(){const v=id=>Math.round(+(($(id)||{}).value||0));return {k:v('#cK'),color:parseInt($('#cCol').value.slice(1),16),minR:v('#cminR'),minG:v('#cminG'),minB:v('#cminB')}}\n"
+  "let calDeb=null;function calSend(){clearTimeout(calDeb);calDeb=setTimeout(()=>{if(!calOn)return;const b=calVals();post('/api/ledtest',Object.assign({secs:90},b));\n"
+  "  const col=$('#cCol').value,r=parseInt(col.slice(1,3),16),g=parseInt(col.slice(3,5),16),bl=parseInt(col.slice(5,7),16),f=(c,m)=>c?Math.max(Math.round(c*b.k/255),m):0;\n"
+  "  const o=[f(r,b.minR),f(g,b.minG),f(bl,b.minB)],raw=[r,g,bl].map(c=>c?Math.round(c*b.k/255):0);\n"
+  "  const n=$('#calNow');if(n)n.innerHTML=`LEDs now show R <b>${o[0]}</b> · G <b>${o[1]}</b> · B <b>${o[2]}</b> (of 255)`+(raw.some((x,i)=>[r,g,bl][i]&&!x)?`<br>Without the minimums: R ${raw[0]} · G ${raw[1]} · B ${raw[2]} — a 0 there is a colour that would drop out.`:'')},150)}\n"
+  "window.on_cK=window.on_cminR=window.on_cminG=window.on_cminB=()=>calSend();\n"
+  "function calPick(b){document.querySelectorAll('#calbox [data-c]').forEach(x=>{x.style.boxShadow=x===b?'0 0 0 2px var(--acc)':''});$('#cCol').value=b.dataset.c;calSend()}\n"
+  "function calStop(){if(!calOn)return;calOn=false;clearInterval(calT);fetch('/api/ledtest',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({secs:0})}).catch(()=>{})}\n"
+  "async function calSave(){const b=calVals();if(await post('/api/global',{minR:b.minR,minG:b.minG,minB:b.minB})){toast('Calibration saved');calStop();nav('hub')}}\n"
+  "function calCancel(){calStop();nav('hub')}\n"
   "/* read-only line for a device page: a global value, with where to change it */\n"
   "function globalNote(txt){return `<p class=\"note\">${txt} · <a href=\"#\" onclick=\"nav('hub');return false\" style=\"color:var(--acc)\">Home settings</a></p>`}\n"
   "</script>\n"
@@ -2263,6 +2290,20 @@ void webBegin() {
     }
     s += "]}"; r->send(200, "application/json", s);
   });
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/ledtest", [](AsyncWebServerRequest* r, JsonVariant& j) {   // LED calibration test on every device
+    if (!guard(r)) return;
+    int secs = constrain((int)(j["secs"] | 0), 0, 600), k = constrain((int)(j["k"] | 5), 1, 255);
+    long col = j["color"] | 0xFFFFFFL; int mn[3] = { j["minR"] | 1, j["minG"] | 1, j["minB"] | 1 };
+    for (int q = 0; q < 3; ++q) mn[q] = constrain(mn[q], 0, 80);
+    hubTestCol[0] = (col >> 16) & 255; hubTestCol[1] = (col >> 8) & 255; hubTestCol[2] = col & 255;
+    for (int q = 0; q < 3; ++q) hubTestMin[q] = mn[q];
+    hubTestK = k; hubTestUntil = secs ? millis() + secs * 1000UL : 0;
+    char t[16]; snprintf(t, sizeof(t), "%02x%02x%02x%02x%02x%02x", hubTestCol[0], hubTestCol[1], hubTestCol[2], mn[0], mn[1], mn[2]);
+    uint8_t macs[MAX_DEV][6]; int n = 0;
+    { DevGuard g; for (int i = 0; i < MAX_DEV; ++i) if (devs[i].used && devs[i].lastSeen && millis() - devs[i].lastSeen < OFFLINE_MS) memcpy(macs[n++], devs[i].mac, 6); }
+    for (int i = 0; i < n; ++i) queueCmd(macs[i], C_LEDTEST, (uint8_t)k, 0, (float)secs, t);
+    jsonOk(r);
+  }));
   server.on("/api/relayhist", HTTP_GET, [](AsyncWebServerRequest* r) {   // seconds ON per relay per hour, 7 days, oldest first
     if (!authOk(r)) { r->send(401, "application/json", "{\"err\":\"login\"}"); return; }
     uint8_t mac[6]; if (!r->hasParam("mac") || !parseMac(r->getParam("mac")->value(), mac)) { r->send(400); return; }
@@ -2658,6 +2699,10 @@ void hubLedTick() {
   // channel at brightness k, never below the calibrated minimum while that colour is lit
   auto ch = [](uint8_t col, uint8_t k, int c) -> uint8_t { if (!col || !k) return 0; int v = (col * k + 127) / 255; int m = gMin[c] ? gMin[c] : 1; return (uint8_t)min(255, max(v, m)); };
   uint32_t c = r == 255 ? ledA.Color(ch(gOk[0], k, 0), ch(gOk[1], k, 1), ch(gOk[2], k, 2)) : ledA.Color(ch(r * 255, k, 0), ch(g * 255, k, 1), ch(b * 255, k, 2));
+  if (hubTestUntil && (int32_t)(hubTestUntil - millis()) > 0) {   // calibration test: test colour + test minimums, day or night
+    auto t = [](int q) -> uint8_t { if (!hubTestCol[q]) return 0; int v = (hubTestCol[q] * hubTestK + 127) / 255; return (uint8_t)min(255, max(v, (int)hubTestMin[q])); };
+    c = ledA.Color(t(0), t(1), t(2));
+  }
   if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
 }
 

@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.10.0-sw"
+#define EDGE_FW           "2.11.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -66,7 +66,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15, C_LEDTEST = 16 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -138,6 +138,9 @@ uint8_t  ledDay = 5, ledNight = 2;                // global: status light peak i
 // global status light look (from the hub): style 0 breath, 1 blink, 2 double blink, 3 steady, 4 off; period + colour when all is well
 uint8_t  ledStyle = 0; uint16_t ledPeriod = 5000; uint8_t okCol[3] = { 0, 255, 0 };
 uint8_t  minC[3] = { 1, 1, 1 };                  // colour calibration (global): lowest R/G/B value while that colour is lit ("mnc")
+// LED test for calibration (from the app): the LED shows testCol at brightness testK with the minimums testMin, day or night
+uint32_t testUntil = 0; uint8_t testCol[3] = { 255, 255, 255 }, testMin[3] = { 1, 1, 1 }, testK = 5;
+uint8_t hexByte(const char* s) { auto h = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0; }; return (uint8_t)(h(s[0]) * 16 + h(s[1])); }
 uint8_t  dayFrom = 7, dayTo = 18;                 // global: daytime hours, used when no room light is known ("df" / "dt")
 /* Breathing sync: the hub sends its beat (millis() % 10000) in every keep-alive; we keep an
    offset so all LEO LEDs breathe on the same beat. Big jumps are taken at once, small radio
@@ -373,6 +376,10 @@ void handleCmd(const MsgCmd& c) {
     case C_INFO:    sendInfo(); sendDiag(); stateDirty = true; break;
     case C_UNPAIR:  forgetHub("hub asked us to forget it"); break;
     case C_FACTORY: factoryReset("requested from the web app"); break;
+    case C_LEDTEST: { char t[25]; memcpy(t, c.text, 24); t[24] = 0;     // t = "rrggbbRRGGBB": colour, then the R/G/B minimums
+      testUntil = c.f > 0 ? millis() + (uint32_t)constrain(c.f, 1.0f, 600.0f) * 1000 : 0;
+      if (strlen(t) >= 12) for (int i = 0; i < 3; ++i) { testCol[i] = hexByte(t + i * 2); testMin[i] = hexByte(t + 6 + i * 2); }
+      testK = c.idx ? c.idx : 1; } break;
     case C_TOUCH:   touchEnabled = c.val != 0; configSave(); sendInfo();
                     dbg(String("Touch buttons ") + (touchEnabled ? "enabled" : "disabled")); break;
     case C_SW_SET: {                                    // idx = field * 16 + relay/pad, value in f
@@ -554,6 +561,10 @@ void ledTick() {
     else                { r = 0; g = 0; b = 1; period = 2000; }
     uint8_t k = statusLevel(period, daylight() > 0.5f ? ledDay : ledNight);   // global style + brightness
     c = r == 255 ? pix.Color(chanC(okCol[0], k, 0), chanC(okCol[1], k, 1), chanC(okCol[2], k, 2)) : pix.Color(chanC(r * 255, k, 0), chanC(g * 255, k, 1), chanC(b * 255, k, 2));
+  }
+  if (testUntil && (int32_t)(testUntil - millis()) > 0) {   // calibration test: the test colour with the test minimums, day or night
+    auto t = [](int ch) -> uint8_t { if (!testCol[ch]) return 0; int v = (testCol[ch] * testK + 127) / 255; return (uint8_t)min(255, max(v, (int)testMin[ch])); };
+    c = pix.Color(t(0), t(1), t(2));
   }
   if (c != shown) { shown = c; pix.setPixelColor(0, c); pix.show(); }   // only talk to the LED when it changes
 }

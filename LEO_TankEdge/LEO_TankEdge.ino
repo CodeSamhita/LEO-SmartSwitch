@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.11.0-tank"
+#define EDGE_FW           "1.12.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -71,7 +71,7 @@ enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TA
                  M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
-                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
+                 C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15, C_LEDTEST = 16 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
 struct __attribute__((packed)) LeoHdr      { uint16_t magic; uint8_t proto; uint8_t type; uint8_t dev; uint8_t seq; };
 struct __attribute__((packed)) LeoAuth     { uint32_t ctr; uint8_t tag[8]; };
 struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t hasKey; char fw[16]; char name[24]; };
@@ -148,6 +148,15 @@ uint16_t ldrMin = 10, ldrMax = 4000;                 // light sensor calibration
 // global status light look (from the hub): style 0 breath, 1 blink, 2 double blink, 3 steady, 4 off; period when all is well; colour when all is well
 uint8_t  ledStyle = 0; uint16_t ledPeriod = 5000; uint8_t okCol[3] = { 0, 255, 0 };
 uint8_t  minC[3] = { 1, 1, 1 };                       // colour calibration (global): lowest R/G/B value while that colour is lit ("mnc")
+// LED test for calibration (from the app): every LED shows testCol at brightness testK with the minimums testMin, day or night
+uint32_t testUntil = 0; uint8_t testCol[3] = { 255, 255, 255 }, testMin[3] = { 1, 1, 1 }, testK = 5;
+bool ledTestOn() { return testUntil && (int32_t)(testUntil - millis()) > 0; }
+uint8_t hexByte(const char* s) { auto h = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0; }; return (uint8_t)(h(s[0]) * 16 + h(s[1])); }
+void ledTestCmd(uint8_t k, float secs, const char* t) {   // t = "rrggbbRRGGBB": colour, then the R/G/B minimums
+  testUntil = secs > 0 ? millis() + (uint32_t)constrain(secs, 1.0f, 600.0f) * 1000 : 0;
+  if (strlen(t) >= 12) for (int i = 0; i < 3; ++i) { testCol[i] = hexByte(t + i * 2); testMin[i] = hexByte(t + 6 + i * 2); }
+  testK = k ? k : 1;
+}
 // simulation from the web app (Advanced): drives the real strip with made-up values for a while; nothing is saved, no alarms
 uint32_t simUntil = 0; float simLevel = 50; int simLdr = 2000; bool simDay = true, simFault = false;
 bool simActive() { return simUntil && (int32_t)(simUntil - millis()) > 0; }
@@ -462,6 +471,10 @@ void ledTick() {
     else c[STATUS_LED] = strip.Color(r * k, g * k, b * k);
   }
 
+  if (ledTestOn()) {                                     // calibration test: every LED, the test colour, the test minimums
+    auto t = [&](int ch) -> uint8_t { if (!testCol[ch]) return 0; int v = (testCol[ch] * testK + 127) / 255; return (uint8_t)min(255, max(v, (int)testMin[ch])); };
+    uint32_t tc = strip.Color(t(0), t(1), t(2)); for (int i = 0; i < NUM_LEDS; ++i) c[i] = tc;
+  }
   static uint32_t shown[NUM_LEDS]; static bool first = true; bool dirty = first; first = false;
   for (int i = 0; i < NUM_LEDS; ++i) if (shown[i] != c[i]) { shown[i] = c[i]; strip.setPixelColor(i, c[i]); dirty = true; }
   if (dirty) strip.show();
@@ -628,6 +641,7 @@ void handleCmd(const MsgCmd& c) {
     case C_INFO:     stateDirty = true; sendTankInfo(); sendTankRules(); sendDiag(); break;
     case C_UNPAIR:   forgetHub("hub asked us to forget it"); break;
     case C_TANK_SET: applySetting(c.idx, c.f); break;
+    case C_LEDTEST:  { char t[25]; memcpy(t, c.text, 24); t[24] = 0; ledTestCmd(c.idx, c.f, t); } break;
     case C_SILENCE:  if (alertNow) { silenced = true; dbg("Alert silenced from the web app"); } break;
     case C_BEEP:
       if (c.idx >= 1 && c.idx <= 6) { if (!alertNow || alertTest) { AlarmRule t = { 1, 0, 0, (uint8_t)(c.idx - 1), 1, (uint8_t)(c.val < 6 ? c.val : 0) }; startAlert(t, -1, true); } }
