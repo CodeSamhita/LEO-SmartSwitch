@@ -10,6 +10,19 @@ Open **`http://leohub.local`**.
 
 The labels are kept short and there are no help bubbles. Less-used settings sit under **＋ More options** style links.
 
+**Device pages** have two tabs: **Control** (live view, buttons, charts) and **Settings** — a list grouped by part
+(e.g. *Sensors · Alarm · Level LEDs · Device*, or one row per relay). Each row opens one screen with a **‹** back button.
+Screens explain in plain words what the current choice does and what is happening right now.
+
+**Nothing changes by accident:** moving a slider, picking from a list or typing only shows the new value and brings up
+the **Unsaved changes · Cancel · Save** bar; nothing is sent until you press **Save**. Leaving the screen asks first.
+Settings that have a low and a high end (tank full/empty distance, Low/Full status text, light sensor OFF/FULL) use
+**one slider with two handles** plus a number box for each end; the ends can't cross. *Hub → Home settings* stays greyed
+until you tap **✎ Edit home settings**.
+
+**Status lights:** every device flashes rapidly while booting (warm white), while a firmware update runs (cyan) and just
+before a restart (white).
+
 **Feedback and motion:** every button that changes something spins while it is sent, then flashes **green** (done) or
 shakes **red** (failed). A slider's value turns green once it is saved. Pages and tabs fade in, toggles slide, and the
 tank bar changes colour smoothly. If the phone asks for reduced motion, animations are off.
@@ -30,6 +43,11 @@ Quick controls for every device. Tap a card (not its buttons) to open the device
 ## Switch page
 Tabs: **Overview** (relays, power chart) · **Relays** (names, watts, in use) · **Setup** (touch pads, name, restart, update, remove, Advanced).
 - **Controls:** every relay (with its colour dot and how long it has been on), All on / All off, signal, uptime and firmware.
+- **Per relay (Settings → the relay):** name, watts, *In use*, and (switch 2.9+) **When switched ON**: *Stay ON until
+  switched OFF* or *Pulse* (ON for the set milliseconds, then OFF by itself — for bells, gate openers, impulse relays),
+  and **ON drives the relay pin LOW or HIGH** (most relay boards: LOW).
+- **Touch pads (switch 2.9+):** on/off, and for each pad which relay it controls (or nothing) and whether it
+  *toggles on each touch* or is *ON only while touched*. All on / All off were removed.
 - **Timers (⏱ next to each relay):** *off in* 15 m / 30 m / 1 h / 2 h / 4 h, or *off at* a time. If the relay is off, the same
   buttons mean *on for*. The row shows *⏱ off in …*. Cancel removes it. Timers are kept by the hub (a hub restart cancels them)
   and each one is recorded in Activity.

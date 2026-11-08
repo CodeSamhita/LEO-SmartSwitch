@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.9.0-sw"
+#define EDGE_FW           "2.9.1-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -535,7 +535,10 @@ void ledTick() {
   if (resetArmed()) {                                   // holding BOOT for a factory reset
     c = pix.Color(resetLevel(), 0, 0);
   } else if (millis() < BOOT_GLOW_MS) {
-    c = bootGlowColor(bootGlowLevel());
+    c = (millis() / 100) % 2 ? bootGlowColor(bootGlowLevel()) : 0;          // booting: rapid warm flashes
+  } else if (otaActive || restartAt) {                                      // update = rapid cyan, restart coming = rapid white
+    uint8_t k = (millis() / 100) % 2 ? max<uint8_t>(daylight() > 0.5f ? ledDay : ledNight, 6) : 0;
+    c = pix.Color(otaActive ? 0 : k, k, k);
   } else if (millis() < identifyUntil) {
     c = ((millis() / 150) % 2) ? pix.Color(90, 90, 90) : 0;
   } else {

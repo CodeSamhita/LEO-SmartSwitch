@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.10.0-tank"
+#define EDGE_FW           "1.10.1-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -449,6 +449,10 @@ void ledTick() {
   else if (!okNow)      { r = 1; g = 0; b = 0; period = 2000; }
   else                  { r = 255; g = 255; b = 255; period = ledPeriod; }    // all well: the global colour and speed
   uint8_t k = statusLevel(period, daylight() > 0.5f ? ledDay : ledNight);   // global style + brightness
+  if (otaActive || restartAt) {                          // update = rapid cyan, restart coming = rapid white
+    k = (millis() / 100) % 2 ? max<uint8_t>(daylight() > 0.5f ? ledDay : ledNight, 6) : 0;
+    r = otaActive ? 0 : 1; g = 1; b = 1;
+  }
   if (millis() >= identifyUntil && k) {
     if (r == 255) c[STATUS_LED] = strip.Color(chan(okCol[0], k), chan(okCol[1], k), chan(okCol[2], k));
     else c[STATUS_LED] = strip.Color(r * k, g * k, b * k);
@@ -740,10 +744,8 @@ void selfTest() {
   ldrRaw = s / 16; litState = ldrRaw > (litOn + litOff) / 2;
   const uint8_t peak = litState ? 14 : 3;
   auto glow = [&](uint8_t k) { for (int i = 0; i < NUM_LEDS; ++i) strip.setPixelColor(i, strip.Color(k, k * 3 / 5, k / 4)); strip.show(); };
-  glow(peak);
   if (litState) { buzzer(true); delay(60); buzzer(false); }
-  delay(1140);
-  for (int step = 10; step >= 0; --step) { glow(peak * step / 10); delay(30); }
+  for (int n = 0; n < 7; ++n) { glow(peak); delay(100); glow(0); delay(100); }   // booting: rapid warm flashes (~1.4 s)
   strip.clear(); strip.show();
 }
 

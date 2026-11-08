@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.4.0"
+#define HUB_FW            "2.5.1"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -1176,6 +1176,14 @@ static const char INDEX_HTML[] PROGMEM =
   ".savebar{position:fixed;left:12px;right:12px;bottom:calc(var(--navh) + 10px);z-index:55;background:var(--s1);border:1px solid var(--acc);border-radius:14px;padding:8px 10px;display:none;align-items:center;gap:8px;box-shadow:0 6px 24px #000a}\n"
   ".savebar.show{display:flex;animation:tin .2s ease-out}.savebar span{flex:1;font-size:13px;font-weight:600}.savebar .btn{flex:0 0 auto;padding:8px 14px}\n"
   "@media(min-width:760px){.savebar{max-width:496px;left:50%;right:auto;transform:translateX(-50%)}}\n"
+  ".dtrk{position:relative;height:30px;margin-top:4px}.dtrk:before{content:\"\";position:absolute;left:11px;right:11px;top:13px;height:4px;border-radius:2px;background:var(--line)}\n"
+  ".dfill{position:absolute;top:13px;height:4px;border-radius:2px;background:var(--acc);margin:0 11px}\n"
+  ".dtrk input[type=range]{position:absolute;left:0;top:0;width:100%;height:30px;margin:0;padding:0;border:0;background:none;pointer-events:none;-webkit-appearance:none;appearance:none}\n"
+  ".dtrk input[type=range]::-webkit-slider-runnable-track{background:transparent;height:30px}.dtrk input[type=range]::-moz-range-track{background:transparent}\n"
+  ".dtrk input[type=range]::-webkit-slider-thumb{pointer-events:auto;-webkit-appearance:none;width:22px;height:22px;margin-top:4px;border-radius:50%;background:var(--acc);border:3px solid var(--s1);box-shadow:0 1px 4px #0008;cursor:pointer}\n"
+  ".dtrk input[type=range]::-moz-range-thumb{pointer-events:auto;width:18px;height:18px;border-radius:50%;background:var(--acc);border:3px solid var(--s1);cursor:pointer}\n"
+  ".dnums{display:flex;justify-content:space-between;gap:10px;margin-top:4px}.dnums label{margin:0;font-size:11.5px}.dnums span{display:flex;align-items:center;gap:4px;margin-top:3px;color:var(--mut);font-size:12px}\n"
+  ".zoomc{margin:2px 0 4px}.zlab{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--mut);margin-top:-2px}.zlab a{color:var(--acc);font-weight:650;text-decoration:none}\n"
   ".why{background:var(--s2);border-radius:10px;padding:9px 11px;font-size:12.5px;line-height:1.5;margin-top:10px}\n"
   "fieldset{border:0;padding:0;margin:0;min-width:0}fieldset:disabled{opacity:.45}\n"
   ".copt{display:flex;align-items:center;gap:12px;width:100%;padding:10px;margin-bottom:6px;border-radius:12px;border:1px solid var(--line);background:var(--s2);color:var(--txt);font:inherit;text-align:left}.copt.on{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}\n"
@@ -1202,7 +1210,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  <p class=\"note\" style=\"margin-top:16px\">Forgot it? Connect the hub by USB and send <b>RESETPASS</b>.</p>\n"
   "</div></div>\n"
   "<div class=\"toast\" id=\"toast\"></div>\n"
-  "<div class=\"savebar\" id=\"savebar\"><span>Unsaved changes</span><button class=\"btn\" onclick=\"unstage()\">Undo</button><button class=\"btn p\" onclick=\"saveStaged()\">Save</button></div>\n"
+  "<div class=\"savebar\" id=\"savebar\"><span>Unsaved changes</span><button class=\"btn\" onclick=\"unstage()\">Cancel</button><button class=\"btn p\" onclick=\"saveStaged()\">Save</button></div>\n"
   "\n"
   "<div class=\"wrap\">\n"
   "  <header>\n"
@@ -1439,7 +1447,7 @@ static const char INDEX_HTML[] PROGMEM =
   "    else if(!c.dataset.uploading){bw.style.display='none';m.textContent=''}}\n"
   "}\n"
   "async function rename(mac,btn){const v=btn.parentElement.querySelector('input').value.trim();if(v)await cmd(mac,4,{text:v})}\n"
-  "async function relMeta(mac,i,btn){const p=btn.parentElement;await cmd(mac,5,{idx:i,text:p.querySelector('[data-r=\"'+i+'n\"]').value.trim(),f:parseFloat(p.querySelector('[data-r=\"'+i+'w\"]').value)||0})}\n"
+  "async function relMeta(mac,i,btn){const p=btn.parentElement;return await cmd(mac,5,{idx:i,text:p.querySelector('[data-r=\"'+i+'n\"]').value.trim(),f:parseFloat(p.querySelector('[data-r=\"'+i+'w\"]').value)||0})}\n"
   "async function forget(mac){const d=S.devices.find(x=>x.mac===mac)||{};\n"
   "  if(!confirm('Remove \"'+(d.name||mac)+'\" from the hub?\\n\\n'+(d.online?'It is online, so it is also told to forget this hub and goes back to \"looking for a hub\" (blue light).':'It is OFFLINE: before adding it again later, factory-reset it (hold its BOOT button 15 s).')+'\\n\\nIts history and settings on the hub are deleted; settings stored on the device itself are kept.'))return;\n"
   "  if(await post('/api/forget',{mac})){devKeys='';toast('Device removed');if(page!=='devices')nav('devices')}}\n"
@@ -1553,6 +1561,23 @@ static const char INDEX_HTML[] PROGMEM =
   "function sl(id,min,max,v,f,chg,w){const live=chg&&chg[0]==='!',code=live?chg.slice(1):chg;\n"
   "  return `<div class=\"row slr\" style=\"margin:0;align-items:center;gap:6px\"><input type=\"range\" id=\"${id}\" min=\"${min}\" max=\"${max}\" value=\"${v}\" data-f=\"${f}\" oninput=\"slShow(this)\" ${code?(live?`onchange=\"${code};this.blur()\"`:`data-chg=\"${code}\" onchange=\"stage(this);this.blur()\"`):''}>\n"
   "  <input type=\"number\" class=\"sln\" inputmode=\"numeric\" value=\"${slVal(f,+v)}\" onchange=\"slNum(this)\" onkeydown=\"if(event.key==='Enter')this.blur()\"><span class=\"meta sls\">${SUF[f](+v)}</span></div>`}\n"
+  "/* two-handle slider for a low / high pair; the two ends can't cross (min gap), each end has its own number box */\n"
+  "const DSUF={cm:' cm',ldrr:' /4095',pct:' %'};\n"
+  "function dsl(id,min,max,lo,hi,f,chg,gap,step,names){const p=v=>((v-min)/(max-min)*100).toFixed(2);\n"
+  "  return `<div class=\"dsl\" id=\"${id}\" data-min=\"${min}\" data-max=\"${max}\" data-gap=\"${gap}\" data-f=\"${f}\" data-chg=\"${chg}\">\n"
+  "  <div class=\"dtrk\"><div class=\"dfill\" style=\"left:${p(lo)}%;right:${100-p(hi)}%\"></div>\n"
+  "   <input type=\"range\" class=\"dlo\" min=\"${min}\" max=\"${max}\" step=\"${step||1}\" value=\"${lo}\" oninput=\"dslIn(this,0)\" onchange=\"stage(this.closest('.dsl'));this.blur()\">\n"
+  "   <input type=\"range\" class=\"dhi\" min=\"${min}\" max=\"${max}\" step=\"${step||1}\" value=\"${hi}\" oninput=\"dslIn(this,1)\" onchange=\"stage(this.closest('.dsl'));this.blur()\"></div>\n"
+  "  <div class=\"dnums\"><label>${names[0]}<span><input type=\"number\" class=\"sln dn0\" step=\"${step||1}\" value=\"${lo}\" onchange=\"dslNum(this,0)\">${DSUF[f]}</span></label>\n"
+  "   <label style=\"text-align:right\">${names[1]}<span><input type=\"number\" class=\"sln dn1\" step=\"${step||1}\" value=\"${hi}\" onchange=\"dslNum(this,1)\">${DSUF[f]}</span></label></div></div>`}\n"
+  "function dslVals(box){return [+box.querySelector('.dlo').value,+box.querySelector('.dhi').value]}\n"
+  "function dslDraw(box){const [lo,hi]=dslVals(box),mn=+box.dataset.min,mx=+box.dataset.max,f=box.querySelector('.dfill'),p=v=>(v-mn)/(mx-mn)*100;\n"
+  "  f.style.left=p(lo)+'%';f.style.right=(100-p(hi))+'%';const n0=box.querySelector('.dn0'),n1=box.querySelector('.dn1');if(document.activeElement!==n0)n0.value=lo;if(document.activeElement!==n1)n1.value=hi}\n"
+  "function dslIn(el,which){const box=el.closest('.dsl'),g=+box.dataset.gap,lo=box.querySelector('.dlo'),hi=box.querySelector('.dhi');\n"
+  "  if(which===0&&+lo.value>+hi.value-g)lo.value=+hi.value-g;if(which===1&&+hi.value<+lo.value+g)hi.value=+lo.value+g;dslDraw(box)}\n"
+  "function dslNum(n,which){const box=n.closest('.dsl'),r=box.querySelector(which?'.dhi':'.dlo');r.value=Math.max(+box.dataset.min,Math.min(+box.dataset.max,+n.value));dslIn(r,which);dslDraw(box);stage(box)}\n"
+  "/* send a low/high pair in an order the tank accepts (it always keeps them the minimum gap apart) */\n"
+  "async function rangeSend(iL,iH,box,curHi){const [lo,hi]=dslVals(box);return hi>curHi?(await tset(iH,hi)&&await tset(iL,lo)):(await tset(iL,lo)&&await tset(iH,hi))}\n"
   "function slShow(el){const n=el.nextElementSibling,f=el.dataset.f;if(document.activeElement!==n)n.value=slVal(f,+el.value);n.nextElementSibling.textContent=SUF[f](+el.value);const h=window['on_'+el.id];if(h)h(+el.value)}\n"
   "function slNum(n){const r=n.previousElementSibling,f=r.dataset.f;let x=+n.value;if(isNaN(x))return;const pos=SMAP[f]?SMAP[f][1](x):x;\n"
   "  const c=Math.max(+r.min,Math.min(+r.max,Math.round(pos)));r.value=c;n.value=slVal(f,c);slShow(r);r.dispatchEvent(new Event('change'))}\n"
@@ -1662,12 +1687,8 @@ static const char INDEX_HTML[] PROGMEM =
   "  <div data-tab=\"size\">\n"
   "  <div class=\"card\">\n"
   "    <div class=\"kv\" style=\"margin-top:-4px\"><span>Sensor reads now</span><b>${t.sensorOk!==false?(t.dist||0).toFixed(1)+' cm → '+Math.round(t.level||0)+' %':'no reading'}</b></div>\n"
-  "    <label>Sensor-to-water distance when the tank is FULL (cm)</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><input id=\"tFull\" type=\"number\" step=\"0.5\" value=\"${c.fullCm.toFixed(1)}\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"useNow('#tFull')\">Use now</button></div>\n"
-  "    <label>Sensor-to-water distance when the tank is EMPTY (cm)</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><input id=\"tEmpty\" type=\"number\" step=\"0.5\" value=\"${c.emptyCm.toFixed(1)}\"><button class=\"btn\" style=\"flex:0 0 auto\" onclick=\"useNow('#tEmpty')\">Use now</button></div>\n"
-  "    <div class=\"row\"><button class=\"btn p\" onclick=\"saveCal()\">Save tank size</button></div>\n"
-  "    <div class=\"note\" id=\"calmsg\"></div>\n"
+  "    <label>Sensor-to-water distance: tank FULL ← → tank EMPTY</label>\n"
+  "    ${dsl('tSz',2,400,c.fullCm,c.emptyCm,'cm',`rangeSend(1,2,this,${c.emptyCm})`,10,0.5,['Full at','Empty at'])}\n"
   "  </div>\n"
   "  </div><div data-tab=\"alarms\">\n"
   "  <div class=\"card\">\n"
@@ -1689,8 +1710,8 @@ static const char INDEX_HTML[] PROGMEM =
   "    ${[[3,'Spectrum','red → orange → yellow → green → cyan → blue'],[0,'Red → Blue','red at the bottom, fading to blue at the top'],[1,'Red → Green','red at the bottom, fading to green at the top']].concat(c.colors?[[2,'Custom','your own colour for every LED (pick them below)']]:[])\n"
   "      .map(([p,n,dsc])=>`<button class=\"copt ${c.palette==p?'on':''}\" data-grp=\"pal\" data-chg=\"tset(8,${p})\" onclick=\"palPick(this)\">${palStrip(c,p)}<span style=\"flex:1\"><b>${n}</b><br><span class=\"meta\">${dsc}</span></span></button>`).join('')}\n"
   "    ${c.palette==2&&c.colors?`<div style=\"margin-top:10px\">${c.colors.slice(0,c.ledCount||7).map((col,i)=>`<div class=\"switchrow\" style=\"margin:4px 0\"><span>LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
-  "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).reverse().join('')}\n"
-  "      <div class=\"row\"><button class=\"btn\" onclick=\"presetColors()\">Preset: Red · greens · Blue</button><button class=\"btn p\" onclick=\"saveColors()\">Save colours</button></div>\n"
+  "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" data-chg=\"tset(${13+i},parseInt(this.value.slice(1),16))\" onchange=\"stage(this)\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).reverse().join('')}\n"
+  "      <div class=\"row\"><button class=\"btn\" onclick=\"presetColors()\">Fill with preset: Red · greens · Blue</button></div>\n"
   "      </div>`:''}\n"
   "  </div>\n"
   "  </div><div data-tab=\"level\">\n"
@@ -1717,24 +1738,21 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"kv\"><span>Light sensor reading now</span><b id=\"ldrRaw\">—</b></div>\n"
   "    <div class=\"kv\"><span>Lowest / highest in 24 h</span><b id=\"ldr24\">—</b></div>\n"
   "  ${c.ldrMin!=null?`\n"
-  "    <label>Level LEDs turn OFF at this reading or darker</label>\n"
-  "    ${sl('tLmn',0,4000,c.ldrMin,'ldr','tset(31,this.value)',130)}\n"
-  "    <label>Level LEDs at FULL brightness at this reading or brighter</label>\n"
-  "    ${sl('tLmx',50,4095,c.ldrMax,'ldr','tset(32,this.value)',130)}\n"
+  "    <label>Level LEDs: OFF at or below ← → FULL brightness at or above</label>\n"
+  "    ${dsl('tLdr',0,4095,c.ldrMin,c.ldrMax,'ldrr',`rangeSend(31,32,this,${c.ldrMax})`,50,1,['OFF at','FULL at'])}\n"
   "    `:''}\n"
   "    ${globalNote('Room counts as dark (for every device) below '+((S.hub.global||{}).litOff||'?'))}\n"
   "  </div>\n"
   "  </div><div data-tab=\"size\">\n"
   "  <h3>Status text</h3>\n"
   "  <div class=\"card\">\n"
-  "    <label style=\"margin-top:0\">Show \"Full\" at / \"Low\" at (%)</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><div><input id=\"tFp\" type=\"number\" min=\"20\" max=\"100\" value=\"${c.fullPct}\" title=\"Full at %\"></div><div><input id=\"tLp\" type=\"number\" min=\"0\" max=\"80\" value=\"${c.lowPct}\" title=\"Low at %\"></div><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"saveAlarms()\">Save</button></div>\n"
-  "    <div class=\"note\" id=\"almsg\"></div>\n"
+  "    <label style=\"margin-top:0\">Shows \"Low\" at or below ← → \"Full\" at or above</label>\n"
+  "    ${dsl('tSt',0,100,c.lowPct,c.fullPct,'pct',`rangeSend(4,3,this,${c.fullPct})`,10,1,['Low at','Full at'])}\n"
   "  </div>\n"
   "  </div><div data-tab=\"device\">\n"
   "  <div class=\"card\">\n"
   "    <label style=\"margin-top:0\">Name</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><input id=\"tName\" value=\"${esc(d.name)}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"tankRename()\">Save</button></div>\n"
+  "    <div class=\"row\" style=\"margin:0\"><input id=\"tName\" value=\"${esc(d.name)}\" data-chg=\"this.value.trim()&&cmd(tankMac,4,{text:this.value.trim()})\" oninput=\"stage(this)\"></div>\n"
   "    <div class=\"row\"><button class=\"btn\" onclick=\"if(confirm('Restart the tank monitor?'))cmd(tankMac,6)\">Restart</button><button class=\"btn\" onclick=\"nav('devices')\">Update firmware…</button></div>\n"
   "    <div class=\"row\"><button class=\"btn d\" onclick=\"forget(tankMac)\">Remove device…</button></div>\n"
   "  </div></div>`;\n"
@@ -1760,8 +1778,8 @@ static const char INDEX_HTML[] PROGMEM =
   "/* preset: bottom LED red (low), top LED blue (high), the ones between fade amber -> greens (fills the pickers; press Save) */\n"
   "function presetColors(){const els=[...document.querySelectorAll('#tset input[data-led]')].sort((a,b)=>a.dataset.led-b.dataset.led),n=els.length;\n"
   "  const stops=[[212,167,44],[150,190,60],[85,150,45],[110,220,120]],mix=(a,b,f)=>a.map((x,k)=>Math.round(x+(b[k]-x)*f)),hex=c=>'#'+c.map(x=>x.toString(16).padStart(2,'0')).join('');\n"
-  "  els.forEach((el,i)=>{let c;if(i===0)c=[229,57,53];else if(i===n-1&&n>1)c=[47,59,255];else{const f=n>3?(i-1)/(n-3):0,p=f*(stops.length-1),k=Math.min(Math.floor(p),stops.length-2);c=mix(stops[k],stops[k+1],p-k)}el.value=hex(c)});\n"
-  "  toast('Preset filled in — press Save colours')}\n"
+  "  els.forEach((el,i)=>{let c;if(i===0)c=[229,57,53];else if(i===n-1&&n>1)c=[47,59,255];else{const f=n>3?(i-1)/(n-3):0,p=f*(stops.length-1),k=Math.min(Math.floor(p),stops.length-2);c=mix(stops[k],stops[k+1],p-k)}el.value=hex(c);if(el.value!==el.dataset.was)stage(el)});\n"
+  "  toast('Preset filled in — press Save to apply')}\n"
   "async function saveColors(){let n=0;for(const el of document.querySelectorAll('#tset input[data-led]')){if(el.value===el.dataset.was)continue;\n"
   "    if(!await tset(13+(+el.dataset.led),parseInt(el.value.slice(1),16)))return toast('Could not reach the hub');n++}\n"
   "  toast(n?n+' colour'+(n>1?'s':'')+' sent':'Nothing changed')}\n"
@@ -1842,9 +1860,8 @@ static const char INDEX_HTML[] PROGMEM =
   "  </div>\n"
   "  <div>\n"
   "    ${rl.map((r,i)=>`<div class=\"card\" data-tab=\"r${i}\">\n"
-  "      <label style=\"margin-top:0\">What it powers (name)</label><input value=\"${esc(r.name)}\" data-r=\"${i}n\" placeholder=\"Name\">\n"
-  "      <label>Power of the light / fan (watts)</label><input type=\"number\" value=\"${r.watts}\" data-r=\"${i}w\">\n"
-  "      <div class=\"row\"><button class=\"btn p\" onclick=\"relMeta(swMac,${i},this.parentElement).then(()=>toast('Saved'))\">Save name &amp; watts</button></div>\n"
+  "      <label style=\"margin-top:0\">What it powers (name)</label><input value=\"${esc(r.name)}\" data-r=\"${i}n\" placeholder=\"Name\" data-grp=\"rm${i}\" data-chg=\"relMeta(swMac,${i},this)\" oninput=\"stage(this)\">\n"
+  "      <label>Power of the light / fan (watts)</label><input type=\"number\" value=\"${r.watts}\" data-r=\"${i}w\" data-grp=\"rm${i}\" data-chg=\"relMeta(swMac,${i},this)\" oninput=\"stage(this)\">\n"
   "      <div class=\"switchrow\" style=\"margin-top:14px\"><span>In use (shown on Home)</span><button class=\"tgl ${r.used===false?'':'on'}\" onclick=\"relUse(this,${i})\"></button></div>\n"
   "      ${r.mode!=null?`<h3 style=\"margin:16px 0 4px\">Output</h3>\n"
   "      <label style=\"margin-top:0\">When switched ON</label><select data-chg=\"swset(${16+i},this.value)\" onchange=\"stage(this);this.blur()\">${opts(['Stay ON until switched OFF','Pulse: ON briefly, then OFF by itself'],r.mode)}</select>\n"
@@ -1860,7 +1877,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  </div><div data-tab=\"device\">\n"
   "  <div class=\"card\">\n"
   "    <label style=\"margin-top:0\">Name</label>\n"
-  "    <div class=\"row\" style=\"margin:0\"><input id=\"swName\" value=\"${esc(d.name)}\"><button class=\"btn\" style=\"flex:0 0 90px\" onclick=\"swRename()\">Save</button></div>\n"
+  "    <div class=\"row\" style=\"margin:0\"><input id=\"swName\" value=\"${esc(d.name)}\" data-chg=\"this.value.trim()&&cmd(swMac,4,{text:this.value.trim()})\" oninput=\"stage(this)\"></div>\n"
   "    <div class=\"row\"><button class=\"btn\" onclick=\"cmd(swMac,3)\">Identify</button><button class=\"btn\" onclick=\"if(confirm('Restart the switch? All relays turn OFF.'))cmd(swMac,6)\">Restart</button></div>\n"
   "    <div class=\"row\"><button class=\"btn\" onclick=\"nav('devices')\">Update firmware…</button><button class=\"btn d\" onclick=\"forget(swMac)\">Remove device…</button></div>\n"
   "    ${(S.hub||{}).global?globalNote(`Status light ${S.hub.global.ledDay} / ${S.hub.global.ledNight} (day / night, of 255)`):''}\n"
@@ -1881,6 +1898,16 @@ static const char INDEX_HTML[] PROGMEM =
   "function h12(h){h=+h;return (h%12||12)+' '+(h<12?'AM':'PM')}\n"
   "function hm(t,s){const h=t.getHours();return (h%12||12)+':'+String(t.getMinutes()).padStart(2,'0')+(s?':'+String(t.getSeconds()).padStart(2,'0'):'')+' '+(h<12?'AM':'PM')}\n"
   "let chartRange='day',chartDrawn='';\n"
+  "const chartZ={};   // zoom per device+range: [from, to] as 0..1 of the range\n"
+  "function zTime(ms,week){const t=new Date(ms);return week?t.toLocaleDateString([], {weekday:'short'})+' '+hm(t):hm(t)}\n"
+  "function zIn(el,which){const c=el.closest('.zoomc'),lo=c.querySelector('.dlo'),hi=c.querySelector('.dhi'),N=+c.dataset.n;\n"
+  "  if(which===0&&+lo.value>+hi.value-2)lo.value=+hi.value-2;if(which===1&&+hi.value<+lo.value+2)hi.value=+lo.value+2;\n"
+  "  const f=c.querySelector('.dfill');f.style.left=(+lo.value/(N-1)*100)+'%';f.style.right=(100-+hi.value/(N-1)*100)+'%';\n"
+  "  const t0=+c.dataset.t0,st=+c.dataset.step,wk=c.dataset.week==='1';c.querySelector('[data-k=za]').textContent=zTime(t0+lo.value*st,wk);\n"
+  "  c.querySelector('[data-k=zb]').textContent=+hi.value>=N-1&&!wk?'now':zTime(t0+hi.value*st,wk)}\n"
+  "function zSet(el){const c=el.closest('.zoomc'),N=+c.dataset.n,lo=+c.querySelector('.dlo').value,hi=+c.querySelector('.dhi').value;el.blur();\n"
+  "  chartZ[c.dataset.k]=[lo/(N-1),hi/(N-1)];chartDrawn='';loadChart(c.dataset.mac,c.dataset.box,c.dataset.unit)}\n"
+  "function zReset(a){const c=a.closest('.zoomc');chartZ[c.dataset.k]=null;chartDrawn='';loadChart(c.dataset.mac,c.dataset.box,c.dataset.unit)}\n"
   "function setRange(r){chartRange=r;pageExtras(page)}\n"
   "function hms(t){return hm(t,1)}\n"
   "async function loadChart(mac,box,unit){\n"
@@ -1903,8 +1930,12 @@ static const char INDEX_HTML[] PROGMEM =
   "  // start where the data starts, so a young history fills the chart instead of hugging the right edge\n"
   "  let note='';const first=v.findIndex(x=>x!=null);\n"
   "  if(first>0&&chartRange!=='yday'){v=v.slice(first);t0+=first*step;note=' · history starts '+(week?new Date(t0).toLocaleDateString([], {weekday:'short'})+' ':'')+hm(new Date(t0))}\n"
+  "  // zoom: the two-handle bar under the chart picks a part of this range (kept while the chart refreshes)\n"
+  "  const zk=mac+chartRange,full=v.length,ft0=t0,z=chartZ[zk]||[0,1];let za=0,zb=full-1;\n"
+  "  if(full>3&&(z[0]>0||z[1]<1)){za=Math.round(z[0]*(full-1));zb=Math.max(za+2,Math.round(z[1]*(full-1)));v=v.slice(za,zb+1);t0+=za*step}\n"
+  "  const atEnd=zb>=full-1,zoomed=za>0||!atEnd;\n"
   "  const pts=v.filter(x=>x!=null),n=v.length;\n"
-  "  if(!pts.length){el.innerHTML=btns+'<div class=\"meta\">No readings for this period yet.</div>';return}\n"
+  "  if(!pts.length){el.innerHTML=btns+'<div class=\"meta\">No readings for this period yet.</div>'+(zoomed?`<a href=\"#\" onclick=\"chartZ['${zk}']=null;pageExtras(page);return false\" style=\"color:var(--acc)\">Show all</a>`:'');return}\n"
   "  // y-axis: water level always 0-100 %; power always 0 to the switch's total watts\n"
   "  // power: 0 to the total watts of the relays in use, the same on every range (stretches only if a reading is higher)\n"
   "  const dvc=S.devices.find(x=>x.mac===mac)||{},capW=(dvc.relays||[]).filter(r=>r.used!==false).reduce((a,r)=>a+(+r.watts||0),0);\n"
@@ -1922,19 +1953,23 @@ static const char INDEX_HTML[] PROGMEM =
   "  const lbl=(i,txt,anc)=>`<text x=\"${X(i)}\" y=\"${H-5}\" fill=\"#64717d\" font-size=\"9\" text-anchor=\"${anc||'middle'}\">${txt}</text>`;\n"
   "  if(chartRange==='yday')[0,6,12,18].forEach(hh=>{g+=lbl(hh,h12(hh),hh?'middle':'start')});\n"
   "  else{const parts=n>8?4:Math.max(1,n-1);for(let k=parts;k>=0;k--){const i=Math.round((n-1)*(parts-k)/parts),t=new Date(t0+i*step);\n"
-  "    g+=lbl(i,!k&&!week?'now':(chartRange==='week'?t.toLocaleDateString([], {weekday:'short'})+' '+hm(t):hm(t)),k===parts?'start':k?'middle':'end')}}\n"
+  "    g+=lbl(i,!k&&!week&&atEnd?'now':(chartRange==='week'?t.toLocaleDateString([], {weekday:'short'})+' '+hm(t):hm(t)),k===parts?'start':k?'middle':'end')}}\n"
   "  const last=pts[pts.length-1],water=unit==='%',col=water?'#4aa8ff':'#f5b841',hrsPer=h.step/3600,u=water?'%':'W',gid='cg'+box.slice(1);\n"
   "  const fv=x=>water?x.toFixed(1):String(Math.round(x)),avg=pts.reduce((a,x)=>a+x,0)/pts.length;\n"
   "  const stats=water?[['Low',fv(Math.min(...pts))+'%'],['High',fv(Math.max(...pts))+'%']]\n"
   "    :[['Peak',Math.round(Math.max(...pts))+' W'],['Avg',Math.round(avg)+' W'],['Energy',(v.reduce((a,x)=>a+(x||0),0)*hrsPer/1000).toFixed(2)+' kWh']];\n"
-  "  const liveDot=!week&&v[n-1]!=null?`<circle cx=\"${X(n-1)}\" cy=\"${Y(v[n-1])}\" r=\"7\" fill=\"${col}\" opacity=\".25\"><animate attributeName=\"r\" values=\"4;9;4\" dur=\"2.4s\" repeatCount=\"indefinite\"/><animate attributeName=\"opacity\" values=\".35;0;.35\" dur=\"2.4s\" repeatCount=\"indefinite\"/></circle><circle cx=\"${X(n-1)}\" cy=\"${Y(v[n-1])}\" r=\"3.5\" fill=\"${col}\" stroke=\"#0c0f12\" stroke-width=\"1.5\"/>`:'';\n"
+  "  const liveDot=!week&&atEnd&&v[n-1]!=null?`<circle cx=\"${X(n-1)}\" cy=\"${Y(v[n-1])}\" r=\"7\" fill=\"${col}\" opacity=\".25\"><animate attributeName=\"r\" values=\"4;9;4\" dur=\"2.4s\" repeatCount=\"indefinite\"/><animate attributeName=\"opacity\" values=\".35;0;.35\" dur=\"2.4s\" repeatCount=\"indefinite\"/></circle><circle cx=\"${X(n-1)}\" cy=\"${Y(v[n-1])}\" r=\"3.5\" fill=\"${col}\" stroke=\"#0c0f12\" stroke-width=\"1.5\"/>`:'';\n"
   "  const res=(fineR?'every 10 s':week?'hourly':'5-min average')+note,anim=chartDrawn!==mac+chartRange;chartDrawn=mac+chartRange;   // draw-in only when the chart is new\n"
   "  el.innerHTML=`<div class=\"chd\"><div><div class=\"cv\" data-k=\"hv\" style=\"color:${col}\">${fv(last)}<small>${u}</small></div><div class=\"meta\" data-k=\"ht\">${week?'latest':'now'}</div></div>\n"
   "    <div class=\"cst\">${stats.map(([k,val])=>`<div><span>${k}</span><b>${val}</b></div>`).join('')}</div></div>${btns}\n"
   "    <svg viewBox=\"0 0 ${W} ${H}\" width=\"100%\" style=\"display:block;touch-action:pan-y;margin-top:6px\"><defs><linearGradient id=\"${gid}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"${col}\" stop-opacity=\".45\"/><stop offset=\"1\" stop-color=\"${col}\" stop-opacity=\"0\"/></linearGradient></defs>\n"
   "    ${g}<path d=\"${area}\" fill=\"url(#${gid})\"/><path class=\"${anim?'cl':''}\" d=\"${line}\" fill=\"none\" stroke=\"${col}\" stroke-width=\"2.2\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/><g fill=\"${col}\">${dots}</g>${liveDot}\n"
   "    <line class=\"cx\" y1=\"${pt}\" y2=\"${H-pb}\" stroke=\"#8b98a4\" stroke-dasharray=\"2 3\" visibility=\"hidden\"/><circle class=\"cd\" r=\"4.5\" fill=\"${col}\" stroke=\"#fff\" stroke-width=\"1.5\" visibility=\"hidden\"/></svg>\n"
-  "    <div class=\"meta\" style=\"text-align:right\">${res}</div>`;\n"
+  "    ${full>3?`<div class=\"zoomc\" data-k=\"${zk}\" data-t0=\"${ft0}\" data-step=\"${step}\" data-n=\"${full}\" data-week=\"${week?1:0}\" data-mac=\"${mac}\" data-box=\"${box}\" data-unit=\"${unit}\">\n"
+  "      <div class=\"dtrk\"><div class=\"dfill\" style=\"left:${za/(full-1)*100}%;right:${100-zb/(full-1)*100}%\"></div>\n"
+  "      <input type=\"range\" class=\"dlo\" min=\"0\" max=\"${full-1}\" value=\"${za}\" oninput=\"zIn(this,0)\" onchange=\"zSet(this)\"><input type=\"range\" class=\"dhi\" min=\"0\" max=\"${full-1}\" value=\"${zb}\" oninput=\"zIn(this,1)\" onchange=\"zSet(this)\"></div>\n"
+  "      <div class=\"zlab\"><span data-k=\"za\">${zTime(ft0+za*step,week)}</span>${zoomed?`<a href=\"#\" onclick=\"zReset(this);return false\">⤢ Show all</a>`:'<span class=\"meta\">drag the ends to zoom in</span>'}<span data-k=\"zb\">${atEnd&&!week?'now':zTime(ft0+zb*step,week)}</span></div></div>`:''}\n"
+  "    <div class=\"meta\" style=\"text-align:right\">${res}${zoomed?' · zoomed':''}</div>`;\n"
   "  // tap / hover: the big number shows the value and time at that point\n"
   "  const svg=el.querySelector('svg'),cx=svg.querySelector('.cx'),cd=svg.querySelector('.cd'),hv=el.querySelector('[data-k=hv]'),ht=el.querySelector('[data-k=ht]');\n"
   "  svg.addEventListener('pointerleave',()=>{cx.setAttribute('visibility','hidden');cd.setAttribute('visibility','hidden');hv.innerHTML=fv(last)+'<small>'+u+'</small>';ht.textContent=week?'latest':'now'});\n"
@@ -1951,10 +1986,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function fmtB(b){return b>=1048576?(b/1048576).toFixed(2)+' MB':Math.round(b/1024)+' KB'}\n"
   "function advRows(a){const r=[];\n"
   "  if(a.temp!==undefined)r.push(['Chip temperature',a.temp.toFixed(1)+' °C','The processor\\'s own sensor; it runs warmer than the room. Above ~80 °C is too hot.']);\n"
-  "  if(a.heap!==undefined)r.push(['Free memory',fmtB(a.heap)+' (lowest '+fmtB(a.heapMin)+')','Working memory (RAM) left. If the lowest value gets very small (under ~20 KB) the device may restart.']);\n"
-  "  if(a.fsTotal)r.push(['Storage used',fmtB(a.fsUsed)+' of '+fmtB(a.fsTotal),'Space for saved files (settings, logs, history).']);\n"
-  "  if(a.sketch)r.push(['Firmware size',fmtB(a.sketch)+' of '+fmtB(a.sketchMax),'Size of the program; it must fit in the update space for wireless updates to work.']);\n"
-  "  if(a.flash)r.push(['Flash chip',fmtB(a.flash),'Total flash memory on the board.']);\n"
+  "  if(a.heap!==undefined)r.push(['Working memory (RAM) free',fmtB(a.heap)+' (lowest '+fmtB(a.heapMin)+')','']);\n"
   "  if(a.psram)r.push(['PSRAM',fmtB(a.psram),'Extra memory chip on the board.']);\n"
   "  if(a.cpu)r.push(['CPU speed',a.cpu+' MHz','']);\n"
   "  if(a.reset!==undefined)r.push(['Last restart cause',RST[a.reset]||a.reset,'Why the chip last started. \"brownout\" means the power supply dipped; \"crash\" or \"watchdog\" means the program had a problem.']);\n"
@@ -1963,7 +1995,13 @@ static const char INDEX_HTML[] PROGMEM =
   "  if(a.channel)r.push(['WiFi channel',a.channel,'The router\\'s channel. All LEO devices follow it automatically.']);\n"
   "  if(a.mac)r.push(['MAC address',a.mac,'']);if(a.ip)r.push(['IP address',a.ip,'']);\n"
   "  if(a.fw)r.push(['Firmware',a.fw,'']);if(a.sdk)r.push(['ESP-IDF',a.sdk,'Version of Espressif\\'s system software inside the firmware.']);\n"
-  "  return r.map(([k,v,h])=>`<div class=\"kv\"><span>${k}${h?q(h):''}</span><b>${esc(v)}</b></div>`).join('')}\n"
+  "  return flashMap(a)+r.map(([k,v,h])=>`<div class=\"kv\"><span>${k}${h?q(h):''}</span><b>${esc(v)}</b></div>`).join('')}\n"
+  "/* flash memory as one bar whose parts add up exactly to the chip size */\n"
+  "function flashMap(a){if(!a.flash||!a.sketchMax)return '';const tot=a.flash,slot=a.sketchMax,fs=a.fsTotal||0,sys=Math.max(0,tot-2*slot-fs);\n"
+  "  const parts=[['Firmware (running)',a.sketch,'#4aa8ff'],['Free in the firmware slot',slot-a.sketch,'#4aa8ff44'],['Kept free for wireless updates',slot,'#5d6a76']]\n"
+  "    .concat(fs?[['Saved files (settings, logs, history)',a.fsUsed,'#34d3b0'],['Free for files',fs-a.fsUsed,'#34d3b044']]:[]).concat([[fs?'System (boot, WiFi, settings)':'System + unused file space',sys,'#2a333c']]);\n"
+  "  return `<div class=\"kv\"><span>Flash memory</span><b>${fmtB(tot)} total</b></div><div style=\"display:flex;height:12px;border-radius:6px;overflow:hidden;margin:4px 0 6px\">${parts.map(([,b,c])=>`<i style=\"flex:${b} 0 0;background:${c}\"></i>`).join('')}</div>\n"
+  "    ${parts.map(([n,b,c])=>`<div class=\"kv\" style=\"font-size:12px;padding:3px 0\"><span><span class=\"rdot\" style=\"background:${c}\"></span>${n}</span><b>${fmtB(b)} · ${(b/tot*100).toFixed(1)}%</b></div>`).join('')}`}\n"
   "async function loadAdv(mac,box){const el=$(box);el.innerHTML='Loading…';\n"
   "  const a=await jget('/api/diag?mac='+encodeURIComponent(mac));if(!a){el.textContent='Not available.';return}\n"
   "  el.innerHTML=(a.known?advRows(a):'<div class=\"meta\">Chip details arrive within a minute (device firmware: switch 2.6 / tank 1.6 or newer).</div>')+(mac===tankMac?simPanel():'')+\n"
@@ -2035,12 +2073,12 @@ static const char INDEX_HTML[] PROGMEM =
   "\n";
 
 void webBegin() {
-  ws.handleHandshake([](AsyncWebServerRequest* r) { return authOk(r); });
+  ws.handleHandshake([](AsyncWebServerRequest* r) { return originOk(r) && authOk(r); });      // other web sites can't listen in
   ws.onEvent([](AsyncWebSocket*, AsyncWebSocketClient* c, AwsEventType t, void*, uint8_t*, size_t) {
     if (t == WS_EVT_CONNECT) c->text(stateJson());
   });
   server.addHandler(&ws);
-  consoleWs.handleHandshake([](AsyncWebServerRequest* r) { return authOk(r); });
+  consoleWs.handleHandshake([](AsyncWebServerRequest* r) { return originOk(r) && authOk(r); });
   consoleWs.onEvent([](AsyncWebSocket*, AsyncWebSocketClient* c, AwsEventType t, void*, uint8_t*, size_t) {
     if (t == WS_EVT_CONNECT) { String h = consoleHistory(); if (h.length()) c->text(h); }
   });
@@ -2555,7 +2593,7 @@ void hubLedTick() {
     return;
   }
   if (millis() < BOOT_GLOW_MS) {                            // power-on glow still fading out
-    uint8_t k = bootGlowLevel(); uint32_t c = ledA.Color(k, k * 3 / 5, k / 4);
+    uint8_t k = (millis() / 100) % 2 ? bootGlowLevel() : 0; uint32_t c = ledA.Color(k, k * 3 / 5, k / 4);   // booting: rapid warm flashes
     if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
     return;
   }
@@ -2575,6 +2613,9 @@ void hubLedTick() {
     case 4: k = 0; break;                                                    // off
     default: { uint32_t len = 800; float s = t < len ? sinf(PI * t / len) : 0; k = (uint8_t)(s * s * peak + 0.5f); }   // breath
   }
+  // firmware update (own or an edge's) = rapid cyan flashing; restart coming = rapid white flashing
+  bool upd = Update.isRunning() || eota.active, rst = restartAt != 0;
+  if (upd || rst) { uint8_t pk = max<uint8_t>(peak, 6); k = (millis() / 100) % 2 ? pk : 0; r = upd ? 0 : 1; g = 1; b = 1; }
   auto ch = [](uint8_t col, uint8_t k) -> uint8_t { if (!col || !k) return 0; return max(1, (col * k + 127) / 255); };
   uint32_t c = r == 255 ? ledA.Color(ch(gOk[0], k), ch(gOk[1], k), ch(gOk[2], k)) : ledA.Color(r * k, g * k, b * k);
   if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }

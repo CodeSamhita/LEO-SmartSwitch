@@ -19,3 +19,24 @@
 - After a **hub factory reset**, the setup hotspot has no password until WiFi is configured. The hub
   logs this, and it only happens after a deliberate reset.
 - The web app uses plain HTTP inside your home network.
+
+## Security test — 2026-11-08 (hub 2.4.0 / 2.4.1)
+Run from a PC on the home WiFi against the real hub. Nothing was changed on the devices: the command tests used a
+made-up device address, so no relay could switch.
+
+| # | Test | Result |
+|---|---|---|
+| 1 | Read state / chip info without signing in | **Allowed — because no hub password is set.** With a password these return 401. |
+| 2 | Send a command from another website (foreign `Origin`) | Blocked (403) ✅ |
+| 3 | Send a command from the app's own page / a script on the LAN | Accepted (expected; needs the password once one is set) |
+| 4 | Another website reading the hub's data (CORS) | Blocked — no CORS headers ✅ |
+| 5 | Another website opening the live-update WebSocket | **Was allowed** (could read live state). **Fixed in hub 2.4.1**: now 401; the app's own page still connects (101) ✅ |
+| 6 | Malformed JSON, 3 KB text field, bad MAC, path traversal (`/../../etc/passwd`) | Rejected (400/404); the hub kept running ✅ |
+| 7 | Other open network ports (21, 22, 23, 81, 443, 3232, 8080, 8266) | None open — only the web app on port 80 ✅ |
+| 8 | Radio packets (code review) | HMAC-SHA256 tag, per-session nonce, strictly increasing counters; unsigned, wrongly signed and replayed packets are dropped ✅ |
+| 9 | Pairing (code review) | The key is sent in clear once while *Allow new devices* is open — see Known limits |
+
+**Most important:** with no password, anyone on your WiFi (a guest's phone, a hacked smart TV) can switch your lights,
+change every setting and even **install new firmware** on the hub and devices. Set a password in *Hub → Security*.
+Other tips: keep the router's WiFi password strong, put guests on a guest network, and open *Allow new devices* only
+when you are adding one.
