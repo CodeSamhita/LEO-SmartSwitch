@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.5.2"
+#define HUB_FW            "2.5.5"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -1183,6 +1183,7 @@ static const char INDEX_HTML[] PROGMEM =
   ".dtrk input[type=range]::-webkit-slider-thumb{pointer-events:auto;-webkit-appearance:none;width:22px;height:22px;margin-top:4px;border-radius:50%;background:var(--acc);border:3px solid var(--s1);box-shadow:0 1px 4px #0008;cursor:pointer}\n"
   ".dtrk input[type=range]::-moz-range-thumb{pointer-events:auto;width:18px;height:18px;border-radius:50%;background:var(--acc);border:3px solid var(--s1);cursor:pointer}\n"
   ".dnums{display:flex;justify-content:space-between;gap:10px;margin-top:4px}.dnums label{margin:0;font-size:11.5px}.dnums span{display:flex;align-items:center;gap:4px;margin-top:3px;color:var(--mut);font-size:12px}\n"
+  "body.devpage nav{display:none}body.devpage .savebar{bottom:calc(12px + env(safe-area-inset-bottom))}body.devpage .toast{bottom:calc(16px + env(safe-area-inset-bottom))}body.devpage .wrap{padding-bottom:80px}\n"
   ".zoomc{margin:2px 0 4px}.zlab{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--mut);margin-top:-2px}.zlab a{color:var(--acc);font-weight:650;text-decoration:none}\n"
   ".why{background:var(--s2);border-radius:10px;padding:9px 11px;font-size:12.5px;line-height:1.5;margin-top:10px}\n"
   "fieldset{border:0;padding:0;margin:0;min-width:0}fieldset:disabled{opacity:.45}\n"
@@ -1374,7 +1375,8 @@ static const char INDEX_HTML[] PROGMEM =
   "  if(p==='tank'||p==='sw'){const d=S.devices.find(x=>x.mac===m)||S.devices.find(x=>x.type===(p==='tank'?'tank':'switch'));if(!d)return;\n"
   "    if(p==='tank')tankMac=d.mac;else swMac=d.mac;subSel[p]=s||'ov';nav(p)}\n"
   "  else if(['devices','activity','hub'].includes(p))nav(p)}\n"
-  "function nav(p){if(p!==page&&!leaveOk())return;if(p!==page)simStop(true);page=p;$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
+  "function nav(p){if(p!==page&&!leaveOk())return;if(p!==page)simStop(true);page=p;document.body.classList.toggle('devpage',p==='tank'||p==='sw');   // device pages: no bottom bar (they have ‹ back)\n"
+  "$$('.page').forEach(s=>s.classList.toggle('active',s.id==='p-'+p));\n"
   "  $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.p===p));\n"
   "  if(p==='devices'){devKeys='';render()} if(p==='hub'){loadHub();logOn()}else logOff(); if(p==='activity')loadActivity();\n"
   "  if(p==='tank'){tsetKey='';renderTank();pageExtras('tank')} if(p==='sw'){swKey='';renderSw();pageExtras('sw')} window.scrollTo({top:0,behavior:'smooth'});route()}\n"
@@ -1552,7 +1554,10 @@ static const char INDEX_HTML[] PROGMEM =
   "   (so a stray touch while scrolling changes nothing). chg starting with '!' = live (simulation). */\n"
   "const pend=new Map();\n"
   "function stage(el){if(el.dataset.grp)for(const k of [...pend.keys()])if(k.dataset.grp===el.dataset.grp)pend.delete(k);pend.delete(el);pend.set(el,el.dataset.chg);$('#savebar').classList.add('show')}\n"
-  "function palPick(el){el.parentElement.querySelectorAll('.copt').forEach(b=>b.classList.toggle('on',b===el));stage(el)}\n"
+  "/* colour choice applies at once (no Save needed) */\n"
+  "async function palPick(el){const all=[...el.parentElement.querySelectorAll('.copt')],was=all.find(b=>b.classList.contains('on'));all.forEach(b=>b.classList.toggle('on',b===el));\n"
+  "  if(!await (new Function('return '+el.dataset.chg)).call(el)){all.forEach(b=>b.classList.toggle('on',b===was));toast('Could not reach the tank');return}\n"
+  "  const cb=$('#custBox');if(cb){const show=el.dataset.chg==='tset(8,2)';cb.style.display=show?'':'none';if(show&&cb.animate)cb.animate([{opacity:0},{opacity:1}],{duration:200})}}\n"
   "function palStrip(c,p){const n=c.ledCount||7,cc=Object.assign({},c,{palette:p});return `<span class=\"strip\">${[...Array(n)].map((_,i)=>`<i style=\"background:${ledCol(cc,i,n)}\"></i>`).join('')}</span>`}\n"
   "async function saveStaged(){const list=[...pend];let ok=true;for(const [el,code] of list){try{if(!await (new Function('return '+code)).call(el))ok=false}catch(e){ok=false}}\n"
   "  pend.clear();$('#savebar').classList.remove('show');toast(ok?'Saved ✓':'Some changes could not be saved');tsetKey='';swKey=''}\n"
@@ -1588,10 +1593,11 @@ static const char INDEX_HTML[] PROGMEM =
   "/* level screen: a picture of the strip with these settings (example: water at 60 %, full daylight) */\n"
   "function hlInfo(h){const el=$('#hlInfo');if(!el)return;const c=tcfg(),n=+(($('#tLeds')||{}).value||c.ledCount||7);if(h==null)h=+(($('#tHl')||{}).value||c.highlight||0);\n"
   "  const lit=Math.max(1,Math.round(n*0.6)),[ta,tb]=hlVals(h,255),cc=Object.assign({},c,{ledCount:n});\n"
-  "  const strip=[...Array(n)].map((_,i)=>{const on=i<lit,k=i===lit-1?ta:tb,col=ledCol(cc,i,n);return `<i style=\"height:12px;background:${on?col:'#1d2630'};opacity:${on?Math.max(.12,k/255).toFixed(2):1};${on&&i===lit-1&&h?'box-shadow:0 0 7px '+col:''}\"></i>`}).join('');\n"
+  "  const gn=i=>+(($('#tG'+i)||{}).value||(c.gain?c.gain[i]:100))/100;   // each LED's own brightness\n"
+  "  const strip=[...Array(n)].map((_,i)=>{const on=i<lit,k=(i===lit-1?ta:tb)*gn(i),col=ledCol(cc,i,n);return `<i style=\"height:12px;background:${on?col:'#1d2630'};opacity:${on?Math.max(.12,k/255).toFixed(2):1};${on&&i===lit-1&&h?'box-shadow:0 0 7px '+col:''}\"></i>`}).join('');\n"
   "  el.innerHTML=`<div style=\"display:flex;gap:14px;align-items:center\"><span class=\"strip\" style=\"width:32px\">${strip}</span><div>Example — water at 60 %: <b>${lit} of ${n}</b> LEDs lit (each LED ≈ ${Math.round(100/n)} % of the tank).<br>\n"
   "    In full daylight the top lit LED is <b>${ta}</b> and the LEDs below it <b>${tb}</b> (of 255).${h?'':'<br>0 % = all lit LEDs equally bright.'}<br><span class=\"meta\">In a dimmer room both scale down together.</span></div></div>`}\n"
-  "window.on_tHl=window.on_tLeds=()=>hlInfo();\n"
+  "window.on_tHl=window.on_tLeds=()=>hlInfo();for(let i=0;i<8;i++)window['on_tG'+i]=()=>hlInfo();\n"
   "function tankLive(){const t=(tankDev()||{}).tank||{},mb=tcfg().minBright||6,s=(id,v)=>{const e=$(id);if(e)e.innerHTML=v};\n"
   "  if(t.ldr!=null){const b=ldrBr(t.ldr);s('#ldrNow',`${inDay()&&b<mb?mb:b} / 255`);s('#ldrRaw',`${t.ldr} / 4095`)}\n"
   "  s('#ldr24',t.ldrLo!=null?`${t.ldrLo} / ${t.ldrHi}`:'collecting…');hlInfo();bzWhen();brWhy()}\n"
@@ -1709,7 +1715,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  <div class=\"card\">\n"
   "    ${[[3,'Spectrum','red → orange → yellow → green → cyan → blue'],[0,'Red → Blue','red at the bottom, fading to blue at the top'],[1,'Red → Green','red at the bottom, fading to green at the top']].concat(c.colors?[[2,'Custom','your own colour for every LED (pick them below)']]:[])\n"
   "      .map(([p,n,dsc])=>`<button class=\"copt ${c.palette==p?'on':''}\" data-grp=\"pal\" data-chg=\"tset(8,${p})\" onclick=\"palPick(this)\">${palStrip(c,p)}<span style=\"flex:1\"><b>${n}</b><br><span class=\"meta\">${dsc}</span></span></button>`).join('')}\n"
-  "    ${c.palette==2&&c.colors?`<div style=\"margin-top:10px\">${c.colors.slice(0,c.ledCount||7).map((col,i)=>`<div class=\"switchrow\" style=\"margin:4px 0\"><span>LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
+  "    ${c.colors?`<div id=\"custBox\" style=\"margin-top:10px;${c.palette==2?'':'display:none'}\">${c.colors.slice(0,c.ledCount||7).map((col,i)=>`<div class=\"switchrow\" style=\"margin:4px 0\"><span>LED ${i+1}${i==0?' (bottom)':i==(c.ledCount||7)-1?' (top)':''}</span>\n"
   "      <input type=\"color\" value=\"${col}\" data-led=\"${i}\" data-was=\"${col}\" data-chg=\"tset(${13+i},parseInt(this.value.slice(1),16))\" onchange=\"stage(this)\" style=\"flex:0 0 64px;height:34px;padding:2px\"></div>`).reverse().join('')}\n"
   "      <div class=\"row\"><button class=\"btn\" onclick=\"presetColors()\">Fill with preset: Red · greens · Blue</button></div>\n"
   "      </div>`:''}\n"
@@ -1719,7 +1725,9 @@ static const char INDEX_HTML[] PROGMEM =
   "    <label style=\"margin-top:0\">Number of LEDs that show the water level</label>\n"
   "    ${sl('tLeds',1,8,c.ledCount||7,'leds','tset(9,this.value)',60)}\n"
   "    ${c.gain?`<label>Top lit LED (the current level) stands out by</label>\n"
-  "    ${sl('tHl',0,100,c.highlight,'pct','tset(21,this.value)',60)}`:''}\n"
+  "    ${sl('tHl',0,100,c.highlight,'pct','tset(21,this.value)',60)}\n"
+  "    <label style=\"margin-top:14px\">Brightness of each LED (% of normal)</label>\n"
+  "    ${[...Array(c.ledCount||7)].map((_,k)=>{const n=c.ledCount||7,i=n-1-k;return `<div class=\"lab2\" style=\"margin-top:6px\"><span><span class=\"rdot\" style=\"background:${ledCol(c,i,n)}\"></span>LED ${i+1}${i==0?' (bottom)':i==n-1?' (top)':''}</span></div>${sl('tG'+i,10,100,c.gain[i],'pct','tset('+(22+i)+',this.value)')}`}).join('')}`:''}\n"
   "    <div class=\"why\" id=\"hlInfo\"></div>\n"
   "  </div>\n"
   "  </div><div data-tab=\"bright\">\n"
@@ -1972,7 +1980,8 @@ static const char INDEX_HTML[] PROGMEM =
   "    ${g}<path d=\"${area}\" fill=\"url(#${gid})\"/><path class=\"${anim?'cl':''}\" d=\"${line}\" fill=\"none\" stroke=\"${col}\" stroke-width=\"2.2\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/><g fill=\"${col}\">${dots}</g>${liveDot}\n"
   "    <g class=\"zsel\" visibility=\"hidden\"><rect class=\"zs0\" y=\"${pt}\" height=\"${H-pt-pb}\" fill=\"#0c0f12\" opacity=\".65\"/><rect class=\"zs1\" y=\"${pt}\" height=\"${H-pt-pb}\" fill=\"#0c0f12\" opacity=\".65\"/>\n"
   "      <line class=\"zl0\" y1=\"${pt-4}\" y2=\"${H-pb}\" stroke=\"var(--acc)\" stroke-width=\"2\"/><line class=\"zl1\" y1=\"${pt-4}\" y2=\"${H-pb}\" stroke=\"var(--acc)\" stroke-width=\"2\"/></g>\n"
-  "    <line class=\"cx\" y1=\"${pt}\" y2=\"${H-pb}\" stroke=\"#8b98a4\" stroke-dasharray=\"2 3\" visibility=\"hidden\"/><circle class=\"cd\" r=\"4.5\" fill=\"${col}\" stroke=\"#fff\" stroke-width=\"1.5\" visibility=\"hidden\"/></svg>\n"
+  "    <line class=\"cx\" y1=\"${pt}\" y2=\"${H-pb}\" stroke=\"#8b98a4\" stroke-dasharray=\"2 3\" visibility=\"hidden\"/><circle class=\"cd\" r=\"4.5\" fill=\"${col}\" stroke=\"#fff\" stroke-width=\"1.5\" visibility=\"hidden\"/>\n"
+  "    <g class=\"tipg\" visibility=\"hidden\" style=\"pointer-events:none\"><rect class=\"tipr\" rx=\"6\" height=\"17\" fill=\"#1b232b\" stroke=\"${col}\" stroke-width=\"1\"/><text class=\"tipt\" fill=\"#e8eef3\" font-size=\"10\" font-weight=\"650\" text-anchor=\"middle\"></text></g></svg>\n"
   "    ${full>3?`<div class=\"zoomc\" data-k=\"${zk}\" data-t0=\"${ft0}\" data-step=\"${step}\" data-n=\"${full}\" data-week=\"${week?1:0}\" data-mac=\"${mac}\" data-box=\"${box}\" data-unit=\"${unit}\" data-za=\"${za}\" data-vn=\"${n}\" data-gx=\"${pl},${W-pr},${W}\">\n"
   "      <div class=\"dtrk\"><div class=\"dfill\" style=\"left:${za/(full-1)*100}%;right:${100-zb/(full-1)*100}%\"></div>\n"
   "      <input type=\"range\" class=\"dlo\" min=\"0\" max=\"${full-1}\" value=\"${za}\" oninput=\"zIn(this,0)\" onchange=\"zSet(this)\"><input type=\"range\" class=\"dhi\" min=\"0\" max=\"${full-1}\" value=\"${zb}\" oninput=\"zIn(this,1)\" onchange=\"zSet(this)\"></div>\n"
@@ -1980,12 +1989,18 @@ static const char INDEX_HTML[] PROGMEM =
   "    <div class=\"meta\" style=\"text-align:right\">${res}${zoomed?' · zoomed':''}</div>`;\n"
   "  // tap / hover: the big number shows the value and time at that point\n"
   "  const svg=el.querySelector('svg'),cx=svg.querySelector('.cx'),cd=svg.querySelector('.cd'),hv=el.querySelector('[data-k=hv]'),ht=el.querySelector('[data-k=ht]');\n"
-  "  svg.addEventListener('pointerleave',()=>{cx.setAttribute('visibility','hidden');cd.setAttribute('visibility','hidden');hv.innerHTML=fv(last)+'<small>'+u+'</small>';ht.textContent=week?'latest':'now'});\n"
+  "  const tipg=svg.querySelector('.tipg'),tipr=svg.querySelector('.tipr'),tipt=svg.querySelector('.tipt');\n"
+  "  svg.addEventListener('pointerleave',()=>{cx.setAttribute('visibility','hidden');cd.setAttribute('visibility','hidden');tipg.setAttribute('visibility','hidden');hv.innerHTML=fv(last)+'<small>'+u+'</small>';ht.textContent=week?'latest':'now'});\n"
   "  const show=e=>{const r=svg.getBoundingClientRect(),x=(e.clientX-r.left)*W/r.width;let i=Math.round((x-pl)/((W-pl-pr)/Math.max(1,n-1)));i=Math.max(0,Math.min(n-1,i));\n"
   "    let j=i;for(let d=0;d<n&&v[j]==null;d++){if(i+d<n&&v[i+d]!=null){j=i+d;break}if(i-d>=0&&v[i-d]!=null){j=i-d;break}}\n"
   "    if(v[j]==null)return;const t=new Date(t0+j*step);\n"
   "    cx.setAttribute('x1',X(j));cx.setAttribute('x2',X(j));cx.setAttribute('visibility','visible');cd.setAttribute('cx',X(j));cd.setAttribute('cy',Y(v[j]));cd.setAttribute('visibility','visible');\n"
-  "    hv.innerHTML=fv(v[j])+'<small>'+u+'</small>';ht.textContent=(week?t.toLocaleDateString([], {weekday:'short',day:'numeric'})+' '+hm(t):fineR?hms(t):hm(t))+(j===n-1&&!week?' (now)':'')};\n"
+  "    const when=(week?t.toLocaleDateString([], {weekday:'short',day:'numeric'})+' '+hm(t):fineR?hms(t):hm(t))+(j===n-1&&!week&&atEnd?' (now)':'');\n"
+  "    hv.innerHTML=fv(v[j])+'<small>'+u+'</small>';ht.textContent=when;\n"
+  "    // floating label right above the point (below it when the point is near the top)\n"
+  "    tipt.textContent=fv(v[j])+(water?'%':' W')+' · '+when;tipg.setAttribute('visibility','visible');\n"
+  "    const w=tipt.getComputedTextLength()+14,px=X(j),py=Y(v[j]),tx=Math.max(pl+w/2,Math.min(W-pr-w/2,px)),ty=py-12<pt+6?py+24:py-12;\n"
+  "    tipt.setAttribute('x',tx);tipt.setAttribute('y',ty);tipr.setAttribute('x',tx-w/2);tipr.setAttribute('y',ty-12);tipr.setAttribute('width',w)};\n"
   "  svg.addEventListener('pointermove',show);svg.addEventListener('pointerdown',show);\n"
   "}\n"
   "\n"
@@ -2334,7 +2349,7 @@ void webBegin() {
       if (idx == 33) { static const char* bm[] = { "always", "outside quiet hours", "when the room is lit", "outside quiet hours and when the room is lit" }; activity(dn + ": buzzer may sound " + bm[(int)f & 3] + " (from " + who(r) + ")", false); }
       if (idx == 34) activity(dn + ": night LED limit set to " + String((int)f) + " / 255 (from " + who(r) + ")", false);
       if (idx == 44) activity(dn + ": LED simulation " + (f > 0 ? "started" : "stopped") + " (from " + who(r) + ")", false);
-      if (idx >= 22 && idx <= 29) activity(dn + ": LED " + String(idx - 21) + " colour-matching brightness set to " + String((int)f) + " % (from " + who(r) + ")", false);
+      if (idx >= 22 && idx <= 29) activity(dn + ": LED " + String(idx - 21) + " brightness set to " + String((int)f) + " % (from " + who(r) + ")", false);
       String v = idx == 5 ? String(f != 0 ? "on" : "off") : idx == 8 ? String(f >= 3 ? "spectrum" : f >= 2 ? "custom" : f != 0 ? "red to green" : "red to blue") : idx == 9 || idx == 12 ? String((int)f) :
                  idx <= 2 ? String(f, 1) + " cm" : idx <= 4 ? String((int)f) + " %" : String((int)f) + ":00";
       if (idx >= 1 && idx <= 12) activity(dn + ": " + names[idx] + " set to " + v + " (from " + who(r) + ")", false);
