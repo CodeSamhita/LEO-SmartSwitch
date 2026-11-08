@@ -38,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "2.9.1-sw"
+#define EDGE_FW           "2.10.0-sw"
 #define RELAY_COUNT       4
 #define RELAY_ACTIVE_LOW  1
 #define NEOPIXEL_PIN      2
@@ -73,7 +73,7 @@ struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t h
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
 struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat;
                                               uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff;
-                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; uint8_t minR, minG, minB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; uint8_t mode[4]; uint16_t pulseMs[4]; uint8_t activeHigh[4]; uint8_t tmap[4]; uint8_t tact[4]; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
@@ -137,6 +137,7 @@ uint8_t  savedRoom = 0;                           // last room light heard, kept
 uint8_t  ledDay = 5, ledNight = 2;                // global: status light peak in a bright / dark room ("ld" / "ln")
 // global status light look (from the hub): style 0 breath, 1 blink, 2 double blink, 3 steady, 4 off; period + colour when all is well
 uint8_t  ledStyle = 0; uint16_t ledPeriod = 5000; uint8_t okCol[3] = { 0, 255, 0 };
+uint8_t  minC[3] = { 1, 1, 1 };                  // colour calibration (global): lowest R/G/B value while that colour is lit ("mnc")
 uint8_t  dayFrom = 7, dayTo = 18;                 // global: daytime hours, used when no room light is known ("df" / "dt")
 /* Breathing sync: the hub sends its beat (millis() % 10000) in every keep-alive; we keep an
    offset so all LEO LEDs breathe on the same beat. Big jumps are taken at once, small radio
@@ -431,7 +432,10 @@ void handlePacket(const RxItem& it) {
       if (blen >= offsetof(MsgPing, ledStyle) && p.g == 1) {   // GLOBAL home settings: status light brightness + daytime hours
         if (p.ledDay != ledDay) { ledDay = p.ledDay; prefs.putUChar("ld", ledDay); }
         if (p.ledNight != ledNight) { ledNight = p.ledNight; prefs.putUChar("ln", ledNight); }
-        if (blen >= sizeof(MsgPing)) {                        // status light look (hub 2.1+)
+        if (blen >= sizeof(MsgPing) && (p.minR != minC[0] || p.minG != minC[1] || p.minB != minC[2])) {   // colour calibration (hub 2.6+)
+          minC[0] = p.minR; minC[1] = p.minG; minC[2] = p.minB; prefs.putBytes("mnc", minC, 3);
+        }
+        if (blen >= offsetof(MsgPing, minR)) {                // status light look (hub 2.1+)
           if (p.ledStyle <= 4 && p.ledStyle != ledStyle) { ledStyle = p.ledStyle; prefs.putUChar("ls", ledStyle); }
           if (p.ledPeriod >= 1000 && p.ledPeriod <= 10000 && 10000 % p.ledPeriod == 0 && p.ledPeriod != ledPeriod) { ledPeriod = p.ledPeriod; prefs.putUShort("lp2", ledPeriod); }
           if (p.okR != okCol[0] || p.okG != okCol[1] || p.okB != okCol[2]) { okCol[0] = p.okR; okCol[1] = p.okG; okCol[2] = p.okB; prefs.putBytes("okc", okCol, 3); }
@@ -515,7 +519,8 @@ uint8_t statusLevel(uint32_t period, uint8_t peak) {
     default: return breathLevel(period, peak);                              // breath
   }
 }
-uint8_t chan(uint8_t col, uint8_t k) { if (!col || !k) return 0; return max(1, (col * k + 127) / 255); }   // colour channel at brightness k
+// colour channel ch (0 R, 1 G, 2 B) at brightness k; never below the calibrated minimum while lit
+uint8_t chanC(uint8_t col, uint8_t k, int ch) { if (!col || !k) return 0; int v = (col * k + 127) / 255; int m = minC[ch] ? minC[ch] : 1; return (uint8_t)min(255, max(v, m)); }
 /* Power-on glow: soft warm white, on the instant the board gets power, gone after ~1.5 s.
    Peak 14/255 if the room was lit when we last heard, 3/255 if it was dark (or never known). */
 #define BOOT_GLOW_MS  1500
@@ -548,7 +553,7 @@ void ledTick() {
     else if (hasKey)    { r = 1; g = 1; b = 0; period = 2000; }
     else                { r = 0; g = 0; b = 1; period = 2000; }
     uint8_t k = statusLevel(period, daylight() > 0.5f ? ledDay : ledNight);   // global style + brightness
-    c = r == 255 ? pix.Color(chan(okCol[0], k), chan(okCol[1], k), chan(okCol[2], k)) : pix.Color(r * k, g * k, b * k);
+    c = r == 255 ? pix.Color(chanC(okCol[0], k, 0), chanC(okCol[1], k, 1), chanC(okCol[2], k, 2)) : pix.Color(chanC(r * 255, k, 0), chanC(g * 255, k, 1), chanC(b * 255, k, 2));
   }
   if (c != shown) { shown = c; pix.setPixelColor(0, c); pix.show(); }   // only talk to the LED when it changes
 }
@@ -572,6 +577,7 @@ void setup() {
   ledStyle = prefs.getUChar("ls", 0); if (ledStyle > 4) ledStyle = 0;
   ledPeriod = prefs.getUShort("lp2", 5000); if (ledPeriod < 1000 || 10000 % ledPeriod) ledPeriod = 5000;
   prefs.getBytes("okc", okCol, 3);
+  prefs.getBytes("mnc", minC, 3);
   dayFrom = prefs.getUChar("df", 7) % 24; dayTo = prefs.getUChar("dt", 18) % 24;
   pix.begin(); pix.setBrightness(255);            // ledTick() sets the real (low) levels
   bootGlowShow();

@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.5.6"
+#define HUB_FW            "2.6.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -79,7 +79,7 @@ struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t h
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
 struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat;
                                               uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff;
-                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; uint8_t minR, minG, minB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; uint8_t mode[4]; uint16_t pulseMs[4]; uint8_t activeHigh[4]; uint8_t tmap[4]; uint8_t tact[4]; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
@@ -207,6 +207,7 @@ uint16_t gLitOn = 120, gLitOff = 80;     // room counts as bright above gLitOn, 
 uint8_t  gLedStyle = 0;                  // status light: 0 breath, 1 blink, 2 double blink, 3 steady, 4 off
 uint16_t gLedPeriod = 5000;              // ... repeats every (ms; 1000/2000/2500/5000/10000 so every device stays in step)
 uint8_t  gOk[3] = { 0, 255, 0 };         // ... colour when all is well (warnings keep their own colours)
+uint8_t  gMin[3] = { 1, 1, 1 };          // colour calibration: lowest R/G/B value while that colour is lit (all LEDs, all devices)
 uint16_t gPriceDay = 616, gPriceNight = 616;   // electricity price, paise per kWh, in / outside the daytime hours (BESCOM LT domestic: Rs 5.80 + 36 p surcharge)
 bool     gInit = false;                  // copied once from the tank's own values when upgrading
 bool okPeriod(int p) { return p == 1000 || p == 2000 || p == 2500 || p == 5000 || p == 10000; }
@@ -214,7 +215,7 @@ void globalsSave() {
   prefs.putUChar("gqf", gQuietFrom); prefs.putUChar("gqt", gQuietTo); prefs.putUChar("gdf", gDayFrom); prefs.putUChar("gdt", gDayTo);
   prefs.putUChar("gld", gLedDay); prefs.putUChar("gln", gLedNight); prefs.putUShort("glon", gLitOn); prefs.putUShort("gloff", gLitOff);
   prefs.putUChar("gls", gLedStyle); prefs.putUShort("glp", gLedPeriod); prefs.putBytes("gok", gOk, 3);
-  prefs.putUShort("gpd", gPriceDay); prefs.putUShort("gpn", gPriceNight);
+  prefs.putUShort("gpd", gPriceDay); prefs.putUShort("gpn", gPriceNight); prefs.putBytes("gmc", gMin, 3);
   prefs.putBool("ginit", true); gInit = true;
 }
 uint32_t staDownSince = 0, lastStaTry = 0, lastPush = 0, restartAt = 0;
@@ -874,7 +875,7 @@ String stateJson() {
   { JsonObject g = h["global"].to<JsonObject>(); g["quietFrom"] = gQuietFrom; g["quietTo"] = gQuietTo; g["dayFrom"] = gDayFrom; g["dayTo"] = gDayTo;
     g["ledDay"] = gLedDay; g["ledNight"] = gLedNight; g["litOn"] = gLitOn; g["litOff"] = gLitOff;
     g["ledStyle"] = gLedStyle; g["ledPeriod"] = gLedPeriod; char hx[8]; snprintf(hx, sizeof(hx), "#%02x%02x%02x", gOk[0], gOk[1], gOk[2]); g["okColor"] = hx;
-    g["priceDay"] = gPriceDay; g["priceNight"] = gPriceNight; }
+    g["priceDay"] = gPriceDay; g["priceNight"] = gPriceNight; g["minR"] = gMin[0]; g["minG"] = gMin[1]; g["minB"] = gMin[2]; }
   if (pendingAt && millis() - pendingAt < 30000) h["pending"] = macStr(pendingMac);   // asking to join in the last 30 s
   h["wifi"] = (WiFi.status() == WL_CONNECTED); h["ip"] = WiFi.localIP().toString();
   h["ap"] = apUp ? apSsid() : String("");
@@ -1548,7 +1549,7 @@ static const char INDEX_HTML[] PROGMEM =
   "function calPct(v){const [lo,hi]=ldrCal();return Math.round(Math.max(0,Math.min(1,(v-lo)/(hi-lo)))*100)}\n"
   "/* slider + number box: drag, or type an exact value; the unit (and % of the range) sits after the box */\n"
   "const SUF={b255:v=>'/255 · '+Math.round(v/2.55)+'%',ldr:v=>'/4095 · '+Math.round(v/40.95)+'%',pct:v=>'%',leds:v=>'of 8',\n"
-  "  lvl:v=>{const n=tcfg().ledCount||7;return '% · '+Math.round(v*n/100)+'/'+n+' LEDs · '+cmOf(v)+' cm'},ldrb:v=>'/4095 → LEDs '+ldrBr(v)+'/255',dark:v=>'/4095',ms:v=>'ms'};\n"
+  "  lvl:v=>{const n=tcfg().ledCount||7;return '% · '+Math.round(v*n/100)+'/'+n+' LEDs · '+cmOf(v)+' cm'},ldrb:v=>'/4095 → LEDs '+ldrBr(v)+'/255',dark:v=>'/4095',ms:v=>'ms',cal:v=>'/255'};\n"
   "const SMAP={dark:[v=>sq2ldr(v),x=>Math.round(ldr2sq(x))]};   // sliders whose position is not the value itself\n"
   "const slVal=(f,v)=>SMAP[f]?SMAP[f][0](v):v;\n"
   "/* changes are STAGED: a slider/drop-down only shows the new value; nothing is sent until you press Save in the bar\n"
@@ -2070,6 +2071,9 @@ static const char INDEX_HTML[] PROGMEM =
   "  <div class=\"hs\"><h4>◉ Status light <span id=\"slp\" style=\"width:18px;height:18px;border-radius:50%;display:inline-block;box-shadow:0 0 0 1px var(--line)\"></span></h4>\n"
   "    <div class=\"row\" style=\"margin:0\"><select id=\"gLs\">${opts(['Breath','Blink','Double blink','Steady','Off'],g.ledStyle||0)}</select><select id=\"gLp\">${[1000,2000,2500,5000,10000].map(p=>`<option value=\"${p}\" ${p==(g.ledPeriod||5000)?'selected':''}>every ${p/1000} s</option>`).join('')}</select></div>\n"
   "    <div class=\"row\" style=\"margin-top:8px;align-items:center\"><input type=\"color\" id=\"gOk\" value=\"${g.okColor||'#00ff00'}\" style=\"flex:0 0 52px;height:34px;padding:2px\">${['#00ff00','#00ffff','#0000ff','#ffffff','#ff8c1a','#ff00ff'].map(x=>`<button class=\"btn\" style=\"flex:0 0 34px;height:34px;padding:0;background:${x}\" onclick=\"$('#gOk').value='${x}'\"></button>`).join('')}</div></div>\n"
+  "  <div class=\"hs\"><h4>🎨 LED colour calibration</h4>\n"
+  "    <div class=\"meta\">When an LED is dim, a colour can drop out (e.g. warm white turns orange). Raise that colour's minimum until it stays. Applies to every LED on every device.</div>\n"
+  "    ${[['minR','Red','#ff4d4d'],['minG','Green','#4dff7a'],['minB','Blue','#4d7bff']].map(([k,n,c])=>`<div class=\"lab\"><span><span class=\"rdot\" style=\"background:${c}\"></span>${n} never below</span></div>${sl('g'+k,0,80,g[k]!=null?g[k]:1,'cal','',90)}`).join('')}</div>\n"
   "  <div class=\"hs\"><h4>◐ Room light <span class=\"meta\" id=\"rlNow\"></span></h4>\n"
   "    <div class=\"meter\" id=\"rlMeter\"></div>\n"
   "    <div class=\"lab\"><span>Dark below</span></div>${sl('gDark',0,100,Math.round(Math.sqrt(g.litOff/4095)*100),'dark','',80)}</div>\n"
@@ -2090,12 +2094,12 @@ static const char INDEX_HTML[] PROGMEM =
   "  el.style.background=$('#gOk').value;el.style.opacity=0.08+0.92*k}requestAnimationFrame(slAnim)})();\n"
   "async function saveHomeSet(){const v=id=>Math.round(+$(id).value),dk=sq2ldr(+$('#gDark').value),mute=$('#gMute').classList.contains('on'),qf=+$('#gQf').value;\n"
   "  const b={quietFrom:qf,quietTo:mute?+$('#gQt').value:qf,dayFrom:+$('#gDf').value,dayTo:+$('#gDt').value,ledDay:v('#gLd'),ledNight:v('#gLn'),\n"
-  "    litOff:dk,litOn:Math.min(4095,dk+Math.max(10,Math.round(dk*0.3))),ledStyle:+$('#gLs').value,ledPeriod:+$('#gLp').value,okColor:parseInt($('#gOk').value.slice(1),16)},m=$('#homemsg');\n"
+  "    litOff:dk,litOn:Math.min(4095,dk+Math.max(10,Math.round(dk*0.3))),ledStyle:+$('#gLs').value,ledPeriod:+$('#gLp').value,okColor:parseInt($('#gOk').value.slice(1),16),minR:v('#gminR'),minG:v('#gminG'),minB:v('#gminB')},m=$('#homemsg');\n"
   "  if(mute&&b.quietFrom===b.quietTo){m.textContent='Night start and end must differ.';return}\n"
   "  const ok=await post('/api/global',b);\n"
   "  if(ok){homeEdit=false;homeKey='';renderHomeSet();toast('Home settings saved')}else m.textContent='Could not save.'}\n"
   "async function homeDefaults(){if(!confirm('Reset home settings to defaults?'))return;\n"
-  "  const ok=await post('/api/global',{quietFrom:22,quietTo:7,dayFrom:7,dayTo:19,ledDay:5,ledNight:2,litOn:120,litOff:80,ledStyle:0,ledPeriod:5000,okColor:0x00ff00});\n"
+  "  const ok=await post('/api/global',{quietFrom:22,quietTo:7,dayFrom:7,dayTo:19,ledDay:5,ledNight:2,litOn:120,litOff:80,ledStyle:0,ledPeriod:5000,okColor:0x00ff00,minR:1,minG:1,minB:1});\n"
   "  homeEdit=false;homeKey='';renderHomeSet();toast(ok?'Defaults restored':'Could not save')}\n"
   "/* read-only line for a device page: a global value, with where to change it */\n"
   "function globalNote(txt){return `<p class=\"note\">${txt} · <a href=\"#\" onclick=\"nav('hub');return false\" style=\"color:var(--acc)\">Home settings</a></p>`}\n"
@@ -2385,6 +2389,8 @@ void webBegin() {
     int pd = j["priceDay"] | (int)gPriceDay, pn = j["priceNight"] | (int)gPriceNight;
     if (pd < 0 || pd > 5000 || pn < 0 || pn > 5000) { r->send(400, "application/json", "{\"err\":\"price\"}"); return; }
     gPriceDay = pd; gPriceNight = pn;
+    { const char* ks[3] = { "minR", "minG", "minB" };          // colour calibration
+      for (int c = 0; c < 3; ++c) { int v = j[ks[c]] | (int)gMin[c]; if (v >= 0 && v <= 80) gMin[c] = v; } }
     if (qf < 0 || qf > 23 || qt < 0 || qt > 23 || df < 0 || df > 23 || dt < 0 || dt > 23 || ld < 0 || ld > 255 || ln < 0 || ln > 255 ||
         lon < 10 || lon > 4095 || loff < 5 || loff >= lon || ls < 0 || ls > 4 || !okPeriod(lp) || okc < 0 || okc > 0xFFFFFF) { r->send(400, "application/json", "{\"err\":\"range\"}"); return; }
     gQuietFrom = qf; gQuietTo = qt; gDayFrom = df; gDayTo = dt; gLedDay = ld; gLedNight = ln; gLitOn = lon; gLitOff = loff;
@@ -2583,6 +2589,7 @@ void setup() {
   gLedPeriod = prefs.getUShort("glp", 5000); if (!okPeriod(gLedPeriod)) gLedPeriod = 5000;
   prefs.getBytes("gok", gOk, 3);
   gPriceDay = prefs.getUShort("gpd", 616); gPriceNight = prefs.getUShort("gpn", 616);
+  prefs.getBytes("gmc", gMin, 3);
   gInit = prefs.getBool("ginit", false);
   lockFrom = prefs.getInt("lockF", 23 * 60); lockTo = prefs.getInt("lockT", 6 * 60);
   tokensLoad();
@@ -2648,8 +2655,9 @@ void hubLedTick() {
   // firmware update (own or an edge's) = rapid cyan flashing; restart coming = rapid white flashing
   bool upd = Update.isRunning() || eota.active, rst = restartAt != 0;
   if (upd || rst) { uint8_t pk = max<uint8_t>(peak, 6); k = (millis() / 100) % 2 ? pk : 0; r = upd ? 0 : 1; g = 1; b = 1; }
-  auto ch = [](uint8_t col, uint8_t k) -> uint8_t { if (!col || !k) return 0; return max(1, (col * k + 127) / 255); };
-  uint32_t c = r == 255 ? ledA.Color(ch(gOk[0], k), ch(gOk[1], k), ch(gOk[2], k)) : ledA.Color(r * k, g * k, b * k);
+  // channel at brightness k, never below the calibrated minimum while that colour is lit
+  auto ch = [](uint8_t col, uint8_t k, int c) -> uint8_t { if (!col || !k) return 0; int v = (col * k + 127) / 255; int m = gMin[c] ? gMin[c] : 1; return (uint8_t)min(255, max(v, m)); };
+  uint32_t c = r == 255 ? ledA.Color(ch(gOk[0], k, 0), ch(gOk[1], k, 1), ch(gOk[2], k, 2)) : ledA.Color(ch(r * 255, k, 0), ch(g * 255, k, 1), ch(b * 255, k, 2));
   if (c != shown) { shown = c; ledA.setPixelColor(0, c); ledA.show(); ledB.setPixelColor(0, c); ledB.show(); }
 }
 
@@ -2706,6 +2714,7 @@ void loop() {
         p.g = 1; p.quietFrom = gQuietFrom; p.quietTo = gQuietTo; p.dayFrom = gDayFrom; p.dayTo = gDayTo;   // global home settings
         p.ledDay = gLedDay; p.ledNight = gLedNight; p.litOn = gLitOn; p.litOff = gLitOff;
         p.ledStyle = gLedStyle; p.ledPeriod = gLedPeriod; p.okR = gOk[0]; p.okG = gOk[1]; p.okB = gOk[2];
+        p.minR = gMin[0]; p.minG = gMin[1]; p.minB = gMin[2];
         sendSigned(i, &p, sizeof(p));
       }
     }

@@ -125,6 +125,9 @@ with the date and time. **Clear log** deletes it.
   - **☀ Day:** the daytime hours and the status light brightness (0–255) in a bright room.
   - **☾ Night:** the night hours, the status light brightness in a dark room, and **Mute sounds** (no sounds during the night hours).
   - **◉ Status light:** Breath, Blink, Double blink, Steady or Off, every 1, 2, 2.5, 5 or 10 s, and the colour when all is well. A live preview dot shows the pattern. Warnings keep their own colours (amber = looking for the hub, blue = not paired / hotspot, cyan = updating or pairing, red = sensor fault). All devices stay in step.
+  - **🎨 LED colour calibration:** for Red, Green and Blue, the lowest value (0–80 of 255) that colour may drop to while it
+    is lit. At low brightness a colour part can round down to off (warm white turns orange, cyan turns green); raise that
+    colour's minimum until it stays. Used by every LED on the hub, switch and tank (hub 2.6, switch 2.10, tank 1.11).
   - **◐ Room light:** one **Dark below** slider on a meter that shows the current reading. The "bright again" point is set automatically a little higher, so the two can never be set the wrong way round.
   - **Reset to defaults** restores all of the above.
   Device pages show these read-only, with a link here. Everything that depends on a device's hardware stays on that device's page.
