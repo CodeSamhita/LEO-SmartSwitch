@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.7.1"
+#define HUB_FW            "2.8.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -178,6 +178,32 @@ uint8_t  pendingMac[6]; uint32_t pendingAt = 0;   // an unknown device asking to
 bool lockManual = false, lockSched = false; int lockFrom = 23 * 60, lockTo = 6 * 60;   // night lock
 
 AsyncWebServer server(80);
+/* Read-only tank view for people on another network (through a port forward on your room router): port 8080
+   serves ONLY a level page and its numbers - no settings, no controls, no device list. Can be switched off. */
+AsyncWebServer viewServer(8080);
+bool gViewOn = true;
+const char VIEW_HTML[] PROGMEM = R"VIEW(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Water tank</title><meta name="theme-color" content="#0c0f12"><style>
+:root{--bg:#0c0f12;--s1:#151b21;--line:#25303a;--txt:#e8eef3;--mut:#7d8b97;--acc:#4aa8ff}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:grid;place-items:center;min-height:100vh}
+.c{background:var(--s1);border:1px solid var(--line);border-radius:22px;padding:22px 26px;display:flex;gap:26px;align-items:center;margin:16px;max-width:420px;width:calc(100% - 32px);box-sizing:border-box}
+.bar{width:64px;height:230px;border:2px solid var(--line);border-radius:14px;display:flex;flex-direction:column-reverse;gap:4px;padding:5px;flex:0 0 auto}
+.seg{flex:1;border-radius:4px;background:#1d2630;transition:background .6s,opacity .6s}
+.big{font-size:56px;font-weight:300;line-height:1;color:var(--acc)}.big small{font-size:20px;color:var(--mut)}
+.m{color:var(--mut);font-size:13px;margin-top:8px}.st{font-size:17px;margin-top:10px;font-weight:600}.bad{color:#f0b429}
+</style></head><body><div class="c"><div class="bar" id="bar"></div><div><div class="m">Water tank</div><div class="big" id="lv">—</div><div class="st" id="st"></div><div class="m" id="up">connecting…</div></div></div>
+<script>
+let n=0,last=0;
+async function go(){try{const r=await fetch('/level',{cache:'no-store'});if(!r.ok)throw 0;const d=await r.json();last=Date.now();
+ if(d.leds!==n){n=d.leds;document.getElementById('bar').innerHTML=Array.from({length:n},()=>'<div class="seg"></div>').join('')}
+ const segs=[...document.querySelectorAll('.seg')],lit=d.ok?Math.round(d.level*n/100):0;
+ segs.forEach((s,i)=>{s.style.background=!d.ok?'#d9a400':i<lit?(d.colors[i]||'#4aa8ff'):'#1d2630';s.style.opacity=!d.ok?.85:1});
+ document.getElementById('lv').innerHTML=d.ok?Math.round(d.level)+'<small> %</small>':'—';
+ const st=document.getElementById('st');st.textContent=!d.online?'Tank offline':!d.ok?'Sensor problem':d.state;st.className='st'+(!d.online||!d.ok?' bad':'');
+}catch(e){}tick()}
+function tick(){const s=Math.round((Date.now()-last)/1000);document.getElementById('up').textContent=last?(s<15?'live':'updated '+s+' s ago'):'connecting…'}
+go();setInterval(go,5000);setInterval(tick,1000);
+</script></body></html>)VIEW";
 AsyncWebSocket ws("/ws");
 AsyncWebSocket consoleWs("/console");
 
@@ -216,7 +242,7 @@ void globalsSave() {
   prefs.putUChar("gqf", gQuietFrom); prefs.putUChar("gqt", gQuietTo); prefs.putUChar("gdf", gDayFrom); prefs.putUChar("gdt", gDayTo);
   prefs.putUChar("gld", gLedDay); prefs.putUChar("gln", gLedNight); prefs.putUShort("glon", gLitOn); prefs.putUShort("gloff", gLitOff);
   prefs.putUChar("gls", gLedStyle); prefs.putUShort("glp", gLedPeriod); prefs.putBytes("gok", gOk, 3);
-  prefs.putUShort("gpd", gPriceDay); prefs.putUShort("gpn", gPriceNight); prefs.putBytes("gmc", gMin, 3);
+  prefs.putUShort("gpd", gPriceDay); prefs.putUShort("gpn", gPriceNight); prefs.putBytes("gmc", gMin, 3); prefs.putBool("gvw", gViewOn);
   prefs.putBool("ginit", true); gInit = true;
 }
 uint32_t staDownSince = 0, lastStaTry = 0, lastPush = 0, restartAt = 0;
@@ -876,7 +902,7 @@ String stateJson() {
   { JsonObject g = h["global"].to<JsonObject>(); g["quietFrom"] = gQuietFrom; g["quietTo"] = gQuietTo; g["dayFrom"] = gDayFrom; g["dayTo"] = gDayTo;
     g["ledDay"] = gLedDay; g["ledNight"] = gLedNight; g["litOn"] = gLitOn; g["litOff"] = gLitOff;
     g["ledStyle"] = gLedStyle; g["ledPeriod"] = gLedPeriod; char hx[8]; snprintf(hx, sizeof(hx), "#%02x%02x%02x", gOk[0], gOk[1], gOk[2]); g["okColor"] = hx;
-    g["priceDay"] = gPriceDay; g["priceNight"] = gPriceNight; g["minR"] = gMin[0]; g["minG"] = gMin[1]; g["minB"] = gMin[2]; }
+    g["priceDay"] = gPriceDay; g["priceNight"] = gPriceNight; g["minR"] = gMin[0]; g["minG"] = gMin[1]; g["minB"] = gMin[2]; g["viewOn"] = gViewOn; }
   if (pendingAt && millis() - pendingAt < 30000) h["pending"] = macStr(pendingMac);   // asking to join in the last 30 s
   h["wifi"] = (WiFi.status() == WL_CONNECTED); h["ip"] = WiFi.localIP().toString();
   h["ap"] = apUp ? apSsid() : String("");
@@ -1256,6 +1282,8 @@ static const char INDEX_HTML[] PROGMEM =
   "  <section class=\"page\" id=\"p-hub\">\n"
   "    <h3>Home settings</h3>\n"
   "    <div class=\"card\" id=\"homeset\"><div class=\"meta\">Loading…</div></div>\n"
+  "    <h3>Tank view for another network</h3>\n"
+  "    <div class=\"card\" id=\"viewcard\"></div>\n"
   "    <div class=\"card slist\" style=\"margin-top:12px\"><button class=\"srow\" onclick=\"nav('cal')\"><span class=\"ic\">🎨</span><span class=\"t\">LED colour calibration</span><span class=\"meta\">lights every LED to test</span><span class=\"chev\">›</span></button></div>\n"
   "    <h3>Night lock</h3>\n"
   "    <div class=\"card\">\n"
@@ -1404,7 +1432,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  const pm=$('#pairmsg');if(pm){if(h.pairing>0&&pairBase){const nw=S.devices.filter(d=>!pairBase.includes(d.mac));pm.innerHTML=nw.length?('✅ Added: '+nw.map(d=>'<b>'+esc(d.name)+'</b>').join(', ')):'Looking for new devices…'}else if(!h.pairing)pairBase=null}\n"
   "  if(page==='home')renderHome();\n"
   "  if(page==='devices')renderDevices();\n"
-  "  if(page==='hub'){renderLock();renderHomeSet()}\n"
+  "  if(page==='hub'){renderLock();renderHomeSet();renderView()}\n"
   "  if(page==='tank')renderTank();\n"
   "  if(page==='sw')renderSw();\n"
   "}\n"
@@ -2105,6 +2133,18 @@ static const char INDEX_HTML[] PROGMEM =
   "async function homeDefaults(){if(!confirm('Reset home settings to defaults?'))return;\n"
   "  const ok=await post('/api/global',{quietFrom:22,quietTo:7,dayFrom:7,dayTo:19,ledDay:5,ledNight:2,litOn:120,litOff:80,ledStyle:0,ledPeriod:5000,okColor:0x00ff00,minR:1,minG:1,minB:1});\n"
   "  homeEdit=false;homeKey='';renderHomeSet();toast(ok?'Defaults restored':'Could not save')}\n"
+  "/* read-only tank page on port 8080, for people on the other router's WiFi (through a port forward) */\n"
+  "let viewKey='';\n"
+  "function renderView(){const el=$('#viewcard'),g=(S.hub||{}).global||{};if(!el)return;const key=String(g.viewOn)+S.hub.ip;if(key===viewKey)return;viewKey=key;const on=g.viewOn!==false,u='http://'+(S.hub.ip||'192.168.1.115')+':8080';\n"
+  "  el.innerHTML=`<div class=\"switchrow\" style=\"margin:0\"><span>Read-only tank page (level only, no controls)</span><button class=\"tgl ${on?'on':''}\" onclick=\"viewSet(${!on})\"></button></div>\n"
+  "    ${on?`<div class=\"kv\" style=\"margin-top:8px\"><span>On this WiFi</span><b><a href=\"${u}\" target=\"_blank\" style=\"color:var(--acc)\">${u}</a></b></div>\n"
+  "    <details class=\"more\"><summary>Set up for the other WiFi</summary><ol class=\"note\" style=\"padding-left:18px;line-height:1.6\">\n"
+  "      <li>On <b>your room router</b>: add a <b>port forward</b> — outside port <b>8080</b> → <b>${S.hub.ip||'192.168.1.115'}</b> port <b>8080</b> (TCP).</li>\n"
+  "      <li>Find your room router's address on the other network (its <b>WAN / Internet IP</b> on the router's status page).</li>\n"
+  "      <li>On the other WiFi open <b>http://&lt;that address&gt;:8080</b>. Bookmark it or add it to the home screen.</li>\n"
+  "      <li>Optional, for a name: in the <b>other router's</b> settings add a local DNS / static hostname, e.g. <b>leotank.home</b> → that address, then use <b>http://leotank.home:8080</b>. (<i>.local</i> names don't pass through routers.)</li>\n"
+  "      <li>Ask the router to keep giving your room router the same address (DHCP reservation), or the link changes.</li></ol></details>`:'<p class=\"note\">Off — port 8080 shows nothing.</p>'}`}\n"
+  "async function viewSet(on){if(await post('/api/global',{viewOn:on})){toast(on?'Tank view on':'Tank view off');viewKey=''}}\n"
   "/* LED colour calibration screen: while it is open every LED on every device shows the test colour, day or night;\n"
   "   the minimums change the real LEDs live. Save keeps them, Cancel / leaving stops the test and restores normal. */\n"
   "let calOn=false,calT=null,calKeep=null;\n"
@@ -2427,6 +2467,7 @@ void webBegin() {
     int pd = j["priceDay"] | (int)gPriceDay, pn = j["priceNight"] | (int)gPriceNight;
     if (pd < 0 || pd > 5000 || pn < 0 || pn > 5000) { r->send(400, "application/json", "{\"err\":\"price\"}"); return; }
     gPriceDay = pd; gPriceNight = pn;
+    if (j["viewOn"].is<bool>()) gViewOn = j["viewOn"].as<bool>();   // read-only tank view on port 8080
     { const char* ks[3] = { "minR", "minG", "minB" };          // colour calibration
       for (int c = 0; c < 3; ++c) { int v = j[ks[c]] | (int)gMin[c]; if (v >= 0 && v <= 80) gMin[c] = v; } }
     if (qf < 0 || qf > 23 || qt < 0 || qt > 23 || df < 0 || df > 23 || dt < 0 || dt > 23 || ld < 0 || ld > 255 || ln < 0 || ln > 255 ||
@@ -2569,6 +2610,33 @@ void webBegin() {
     r->send(404, "text/plain", "404");
   });
   server.begin();
+  // read-only tank view on port 8080 (nothing else is served there)
+  viewServer.on("/", HTTP_GET, [](AsyncWebServerRequest* r) {
+    if (!gViewOn) { r->send(404, "text/plain", "Tank view is switched off"); return; }
+    AsyncWebServerResponse* res = r->beginResponse(200, "text/html", (const uint8_t*)VIEW_HTML, strlen_P(VIEW_HTML));
+    res->addHeader("Cache-Control", "no-cache"); r->send(res);
+  });
+  viewServer.on("/level", HTTP_GET, [](AsyncWebServerRequest* r) {
+    if (!gViewOn) { r->send(404); return; }
+    JsonDocument d; d["online"] = false; d["ok"] = false; d["level"] = 0; d["leds"] = 7; d["state"] = "";
+    { DevGuard g;
+      for (int i = 0; i < MAX_DEV; ++i) { Dev& v = devs[i]; if (!v.used || v.type != DEV_TANK) continue;
+        d["online"] = v.lastSeen && millis() - v.lastSeen < OFFLINE_MS; d["ok"] = (bool)v.sensorOk; d["level"] = v.levelPct; d["state"] = v.stateTxt;
+        int n = v.tcfgKnown && v.tLedCount ? v.tLedCount : 7; d["leds"] = n;
+        JsonArray c = d["colors"].to<JsonArray>();                       // the strip's own colours, bottom first
+        for (int k = 0; k < n; ++k) {
+          char hx[8]; uint8_t rr, gg, bb; float t = n > 1 ? (float)k / (n - 1) : 1;
+          if (v.tPalette == 2 && v.tColorsKnown) { rr = v.tColors[k * 3]; gg = v.tColors[k * 3 + 1]; bb = v.tColors[k * 3 + 2]; }
+          else if (v.tPalette == 3) { float h = t * 240, x = 1 - fabsf(fmodf(h / 60, 2) - 1); float R = h < 60 ? 1 : h < 120 ? x : 0, G = h < 60 ? x : h < 180 ? 1 : x, B = h < 120 ? 0 : h < 180 ? x : 1; rr = R * 255; gg = G * 255; bb = B * 255; }
+          else { rr = 255 * (1 - t); gg = v.tPalette == 1 ? 255 * t : 0; bb = v.tPalette == 1 ? 0 : 255 * t; }
+          snprintf(hx, sizeof(hx), "#%02x%02x%02x", rr, gg, bb); c.add(hx);
+        }
+        break; } }
+    String s; serializeJson(d, s);
+    AsyncWebServerResponse* res = r->beginResponse(200, "application/json", s); res->addHeader("Cache-Control", "no-store"); r->send(res);
+  });
+  viewServer.onNotFound([](AsyncWebServerRequest* r) { r->send(404); });
+  viewServer.begin();
 }
 
 /* ------------------------- USB serial commands ---------------------- */
@@ -2628,6 +2696,7 @@ void setup() {
   prefs.getBytes("gok", gOk, 3);
   gPriceDay = prefs.getUShort("gpd", 616); gPriceNight = prefs.getUShort("gpn", 616);
   prefs.getBytes("gmc", gMin, 3);
+  gViewOn = prefs.getBool("gvw", true);
   gInit = prefs.getBool("ginit", false);
   lockFrom = prefs.getInt("lockF", 23 * 60); lockTo = prefs.getInt("lockT", 6 * 60);
   tokensLoad();

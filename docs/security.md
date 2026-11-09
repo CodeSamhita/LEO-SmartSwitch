@@ -19,6 +19,9 @@
 - After a **hub factory reset**, the setup hotspot has no password until WiFi is configured. The hub
   logs this, and it only happens after a deliberate reset.
 - The web app uses plain HTTP inside your home network.
+- **Port 8080 (hub 2.8+)** serves a read-only tank page for another network: only the level, status and LED colours —
+  no settings, no controls, no device list, no login (every other path returns 404). Anyone who can reach that port
+  can see the tank level. Switch it off in *Hub → Tank view for another network* if you don't use it.
 
 ## Security test — 2026-11-08 (hub 2.4.0 / 2.4.1)
 Run from a PC on the home WiFi against the real hub. Nothing was changed on the devices: the command tests used a

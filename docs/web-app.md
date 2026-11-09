@@ -125,6 +125,12 @@ with the date and time. **Clear log** deletes it.
   - **☀ Day:** the daytime hours and the status light brightness (0–255) in a bright room.
   - **☾ Night:** the night hours, the status light brightness in a dark room, and **Mute sounds** (no sounds during the night hours).
   - **◉ Status light:** Breath, Blink, Double blink, Steady or Off, every 1, 2, 2.5, 5 or 10 s, and the colour when all is well. A live preview dot shows the pattern. Warnings keep their own colours (amber = looking for the hub, blue = not paired / hotspot, cyan = updating or pairing, red = sensor fault). All devices stay in step.
+- **Tank view for another network** (hub 2.8): a read-only page on port **8080** with just the tank level (same LED
+  colours as the strip, live every 5 s, "Tank offline" / "Sensor problem" when needed) — no controls. On this WiFi it is
+  `http://192.168.1.115:8080`. For the other router's WiFi: add a **port forward** on your room router (outside port
+  8080 → hub IP port 8080, TCP), then open `http://<room router's WAN IP>:8080` there. For a name instead of a number,
+  add a local DNS / static hostname on the **other** router (e.g. `leotank.home`); `.local` names don't cross routers.
+  A switch turns the page off.
 - **🎨 LED colour calibration** (its own screen, from the Hub page; hub 2.7, switch 2.11, tank 1.12): while the screen is
   open, **every LED on every device** lights up in a test colour (white, warm white, cyan, yellow, magenta, orange or any
   colour) at the test brightness you choose — also at night. Set **Red / Green / Blue never below** (0–80 of 255): the
