@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.13.0-tank"
+#define EDGE_FW           "1.13.1-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -282,6 +282,22 @@ void measureTick() {
   float med = pings[good / 2];
   badStreak = 0;
   if (!sensorOk) { if (++goodStreak < 3) return; sensorOk = true; tankEvent("Level sensor working again (" + String(med, 0) + " cm)"); }
+  // stray reading filter: a reading more than 15 % of the tank away from the last one is used only once the next
+  // 2 readings agree with it (within 5 %), so one wild echo never moves the level, the LEDs or an alarm
+  static uint8_t jumpN = 0; static float jumpCm = 0; static uint32_t jumpLogAt = 0;
+  float span = fabsf(tankEmptyCm - tankFullCm); if (span < 10) span = 10;
+  if (measureSeq && fabsf(med - distCm) > span * 0.15f) {
+    if (jumpN && fabsf(med - jumpCm) < span * 0.05f) jumpN++; else { jumpN = 1; jumpCm = med; }
+    if (jumpN < 3) {
+      if (!jumpLogAt || millis() - jumpLogAt > 60000) {
+        jumpLogAt = millis();
+        tankEvent("Ignored stray reading " + String(med, 0) + " cm (" + String(constrain((tankEmptyCm - med) * 100 / (tankEmptyCm - tankFullCm), 0.0f, 100.0f), 0) + "%), level stays " + String(levelPct, 0) + "%");
+      }
+      return;
+    }
+    tankEvent("Level jumped to " + String(med, 0) + " cm - 3 readings agree");
+  }
+  jumpN = 0;
   distCm = med;
   recomputeLevel();
   measureSeq++;
@@ -297,7 +313,7 @@ void ldrTick() {
 /* ------------------------------ alerts ----------------------------- */
 void buzzer(bool on) { digitalWrite(BUZZER_PIN, on ? HIGH : LOW); }
 const char* SND_NAME[6] = { "chirp", "short beeps", "long beeps", "triple beep", "siren", "LEDs only" };
-const char* FLASH_NAME[6] = { "no flash", "green flash", "red flash", "blue flash", "white flash", "amber flash" };
+const char* FLASH_NAME[6] = { "no flash", "green", "red", "blue", "white", "amber" };
 String ruleTxt(const AlarmRule& r) { return String(r.dir ? "drops to " : "rises to ") + String(r.level) + "%"; }
 String muteWhy() {                                       // why the buzzer would be silent right now ("" = it may sound)
   if (!buzzerOn) return "buzzer switched off";
@@ -310,9 +326,9 @@ String muteWhy() {                                       // why the buzzer would
   }
 }
 uint8_t silencedBy = 0;                                  // 1 button, 2 web app
-String alertName() { return alertTest ? String("Test") : "Alarm rule " + String(alertRule + 1) + " (" + ruleTxt(alertR) + ")"; }
+String alertName() { return alertTest ? String("Test") : "Rule " + String(alertRule + 1) + " (" + ruleTxt(alertR) + ")"; }
 void stopAlert(const String& why) {
-  if (alertNow) tankEvent(alertName() + " ended: " + why + " - played " + String(alertRound) + " of " + String(alertR.repeats ? alertR.repeats : 1));
+  if (alertNow) tankEvent(alertName() + " ended: " + why + ", played " + String(alertRound) + "/" + String(alertR.repeats ? alertR.repeats : 1));
   alertNow = A_NONE; alertRule = -1; alertTest = false; alertOn = false; buzzer(false); stateDirty = true;
 }
 bool alertAllowed = true;                                // last buzzer permission seen during this alarm (for the log)
@@ -320,13 +336,13 @@ void startAlert(const AlarmRule& r, int8_t idx, bool test) {
   alertR = r; alertRule = idx; alertTest = test; alertNow = (test || r.dir == 0) ? A_FULL : A_LOW;
   alertRound = 0; beepIdx = 0; alertOn = false; alertPhaseAt = millis(); alertWait = 0; silenced = false; silencedBy = 0; stateDirty = true;
   String m = muteWhy(); alertAllowed = test || !m.length();
-  tankEvent(alertName() + (test ? String(" started") : " started at " + String(levelPct, 0) + "%") + ": " + SND_NAME[r.pattern < 6 ? r.pattern : 1] +
+  tankEvent(alertName() + (test ? String(" started") : " at " + String(levelPct, 0) + "%") + ": " + SND_NAME[r.pattern < 6 ? r.pattern : 1] +
             " x" + String(r.repeats ? r.repeats : 1) + ", " + FLASH_NAME[r.color < 6 ? r.color : 2] +
-            (r.pattern == 5 ? String("") : m.length() ? (test ? " (a real alarm now would be silent: " + m + ")" : " - buzzer silent: " + m) : String("")));
+            (r.pattern == 5 ? String("") : m.length() ? (test ? " (real alarm silent now: " + m + ")" : ", silent: " + m) : String("")));
 }
 bool ruleHit(const AlarmRule& r)   { return r.dir == 0 ? levelPct >= r.level : levelPct <= r.level; }
 bool ruleClear(const AlarmRule& r) { return r.dir == 0 ? levelPct < r.level - 5 : levelPct > r.level + 5; }   // 5 % back
-/* A rule starts only after 2 readings in a row at its mark (one stray reading can't start it), and once started it
+/* A rule starts only after 3 readings in a row at its mark (one stray reading can't start it), and once started it
    always plays its full count - readings never stop it; only the button, Silence in the web app, or changing the
    rule do. It re-arms after the level has stayed 5 % away for a minute, so a jumpy reading can't repeat it. */
 #define REARM_MS 60000
@@ -351,7 +367,7 @@ void alertTick() {
         else if (!ruleAwaySince[i]) ruleAwaySince[i] = millis() | 1;
         else if (!ruleArmed[i] && millis() - ruleAwaySince[i] >= REARM_MS) { ruleArmed[i] = true; dbg("Rule " + String(i + 1) + " re-armed"); }
       }
-      if (!alertNow && ruleArmed[i] && ruleHits[i] >= 2) { ruleArmed[i] = false; startAlert(r, i, false); }
+      if (!alertNow && ruleArmed[i] && ruleHits[i] >= 3) { ruleArmed[i] = false; startAlert(r, i, false); }
     }
   }
   if (!alertNow) return;

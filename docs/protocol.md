@@ -77,7 +77,8 @@ colour `okR, okG, okB` (hub 2.1+), then the colour minimums `minR, minG, minB` (
 `emMode` (0 off, 1 steady, 2 strobe, 3 slow flash) and `emR, emG, emB` (hub 2.9+): the status LED shows that colour at full
 power, day or night, until a ping says 0. It is not saved, so a restart clears it until the next ping.
 
-Alarm rules (tank 1.13+): a rule starts after 2 readings in a row at its mark, then always plays its full count; only the
+Alarm rules (tank 1.13.1+): a reading more than 15 % of the tank away from the last one is ignored unless the next 2
+readings agree with it (logged as "Ignored stray reading", at most once a minute). A rule starts after 3 readings in a row at its mark, then always plays its full count; only the
 button, SILENCE or changing the rule stop it. It re-arms after the level has stayed 5 % away for 60 s.
 
 Colour calibration (all devices, hub 2.9 / switch 2.12 / tank 1.13): a dim colour keeps its mix. The strongest part is
