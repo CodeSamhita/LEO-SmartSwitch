@@ -23,6 +23,7 @@ little-endian structs.
 | 14 | PING | hub → edge | keep-alive: local time (minutes), room light, beat (ms % 10000); with g = 1 also the global home settings (quiet hours, daytime hours, status-light brightness day/night, room-light thresholds) |
 | 15 | DIAG | edge → hub | chip temperature, heap, storage, flash, firmware size, reset reason, CPU MHz, ESP-IDF version |
 | 16 | TANK_RULES | tank → hub | 6 alarm rules × {on, level %, dir (0 rises to, 1 drops to), sound 0–5, repeats, flash colour 0–5} |
+| 17 | EVENT | edge → hub | `id`, `text[64]`: one line for the activity log (alarm started/ended and why, buzzer muted and why, room light, level sensor). Sent twice; the hub drops the repeat by `id` (tank 1.13+) |
 
 ## Commands (`CMD.cmd`)
 | # | Command | Used by |
@@ -38,7 +39,7 @@ little-endian structs.
 | 9 | TOUCH (val) | switch |
 | 10 | TANK_SET (idx, f) | tank |
 | 11 | SILENCE | tank |
-| 12 | BEEP: idx 0 = short beep, idx 1–6 = play sound idx-1 once, val = flash colour | tank |
+| 12 | BEEP: idx 0 = short beep, idx 1–6 = play sound idx-1, val = flash colour, f = how many times 1–30 (tank 1.13+; older: once) | tank |
 | 13 | FACTORY | all |
 | 14 | TANK_RULE: idx = rule 0–5, text[0..5] = rule bytes | tank |
 
@@ -72,7 +73,15 @@ little-endian structs.
 
 TANK_INFO ends with `ldrMin, ldrMax` (tank 1.9+). PING ends with `ledStyle` (0 breath, 1 blink, 2 double blink,
 3 steady, 4 off), `ledPeriod` (ms: 1000, 2000, 2500, 5000 or 10000, so the beat stays in step) and the all-well
-colour `okR, okG, okB` (hub 2.1+).
+colour `okR, okG, okB` (hub 2.1+), then the colour minimums `minR, minG, minB` (hub 2.6+), then the emergency light
+`emMode` (0 off, 1 steady, 2 strobe, 3 slow flash) and `emR, emG, emB` (hub 2.9+): the status LED shows that colour at full
+power, day or night, until a ping says 0. It is not saved, so a restart clears it until the next ping.
+
+Alarm rules (tank 1.13+): a rule starts after 2 readings in a row at its mark, then always plays its full count; only the
+button, SILENCE or changing the rule stop it. It re-arms after the level has stayed 5 % away for 60 s.
+
+Colour calibration (all devices, hub 2.9 / switch 2.12 / tank 1.13): a dim colour keeps its mix. The strongest part is
+held at its minimum and the others scale with it; a part far below its own minimum goes off instead of jumping up.
 
 ## Compatibility rule
 New fields are only ever **appended** to a struct. Receivers accept the older, shorter length and use

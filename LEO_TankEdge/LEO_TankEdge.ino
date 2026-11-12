@@ -41,7 +41,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define EDGE_FW           "1.12.0-tank"
+#define EDGE_FW           "1.13.0-tank"
 #define TRIG_PIN          4
 #define ECHO_PIN          3
 #define LDR_PIN           0
@@ -68,7 +68,7 @@
 #define LEO_MAGIC  0x4C45
 #define LEO_PROTO  2
 enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5, M_TANK_INFO = 6,
-                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
+                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16, M_EVENT = 17 };   // M_EVENT: edge -> hub, a line for the activity log
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
                  C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15, C_LEDTEST = 16 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
@@ -78,12 +78,14 @@ struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t h
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
 struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat;
                                               uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff;
-                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; uint8_t minR, minG, minB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; uint8_t minR, minG, minB;
+                                              uint8_t emMode, emR, emG, emB; };   // emergency light on the status LED (hub 2.9+): 0 off, 1 steady, 2 strobe, 3 slow flash; full brightness, day or night   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; uint8_t mode[4]; uint16_t pulseMs[4]; uint8_t activeHigh[4]; uint8_t tmap[4]; uint8_t tact[4]; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; uint8_t highlight; uint8_t gain[8]; uint16_t ldrMin; uint16_t ldrMax; uint8_t buzzMode; uint8_t nightMax; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
 struct __attribute__((packed)) MsgTankRules { LeoHdr h; uint8_t count; uint8_t r[6][6]; };   // alarm rules: on, level %, dir (0 rises to, 1 drops to), pattern, repeats, colour
+struct __attribute__((packed)) MsgEvent    { LeoHdr h; uint8_t id; char text[64]; };   // id counts up per event (hub drops repeats)
 struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
@@ -148,6 +150,10 @@ uint16_t ldrMin = 10, ldrMax = 4000;                 // light sensor calibration
 // global status light look (from the hub): style 0 breath, 1 blink, 2 double blink, 3 steady, 4 off; period when all is well; colour when all is well
 uint8_t  ledStyle = 0; uint16_t ledPeriod = 5000; uint8_t okCol[3] = { 0, 255, 0 };
 uint8_t  minC[3] = { 1, 1, 1 };                       // colour calibration (global): lowest R/G/B value while that colour is lit ("mnc")
+uint8_t  emMode = 0, emCol[3] = { 255, 255, 255 };     // emergency light on the status LED, from the hub (not saved: a power cut clears it)
+bool emOnNow() {                                         // emergency pattern: 1 steady, 2 strobe, 3 slow flash
+  return emMode == 1 || (emMode == 2 && millis() % 140 < 50) || (emMode == 3 && millis() % 1000 < 500);
+}
 // LED test for calibration (from the app): every LED shows testCol at brightness testK with the minimums testMin, day or night
 uint32_t testUntil = 0; uint8_t testCol[3] = { 255, 255, 255 }, testMin[3] = { 1, 1, 1 }, testK = 5;
 bool ledTestOn() { return testUntil && (int32_t)(testUntil - millis()) > 0; }
@@ -255,6 +261,8 @@ void recomputeLevel() {                 // distance -> % with the current calibr
 }
 // 10 pings spread over the measurement period (one per call, ~150 ms apart), median of the good ones
 float    pings[10]; uint8_t pingCount = 0, pingFails = 0; uint32_t lastPingAt = 0;
+uint32_t measureSeq = 0;                // counts good level readings
+void tankEvent(const String& s);
 void measureTick() {
   if (millis() - lastPingAt < MEASURE_MS / 10) return;
   lastPingAt = millis();
@@ -266,57 +274,89 @@ void measureTick() {
   int good = pingCount - pingFails; pingCount = pingFails = 0;
   if (good < 5) {                                         // sensor missing / not seeing water
     goodStreak = 0;
-    if (++badStreak >= 2 && sensorOk) { sensorOk = false; stateDirty = true; dbg("Ultrasonic sensor: no echo"); }
+    if (++badStreak >= 2 && sensorOk) { sensorOk = false; stateDirty = true; tankEvent("Level sensor: no echo (sensor problem)"); }
     if (!sensorOk) { distCm = 0; levelPct = 0; levelLeds = 0; }
     return;
   }
   for (int i = 1; i < good; ++i) { float v = pings[i]; int j = i - 1; while (j >= 0 && pings[j] > v) { pings[j + 1] = pings[j]; j--; } pings[j + 1] = v; }
   float med = pings[good / 2];
   badStreak = 0;
-  if (!sensorOk) { if (++goodStreak < 3) return; sensorOk = true; dbg("Ultrasonic sensor OK"); }
+  if (!sensorOk) { if (++goodStreak < 3) return; sensorOk = true; tankEvent("Level sensor working again (" + String(med, 0) + " cm)"); }
   distCm = med;
   recomputeLevel();
+  measureSeq++;
 }
 void ldrTick() {
   static uint32_t last = 0; if (millis() - last < 500) return; last = millis();
   long s = 0; for (int i = 0; i < 16; ++i) s += analogRead(LDR_PIN);
   ldrRaw = s / 16;
   bool lit = litState ? ldrRaw > litOff : ldrRaw > litOn;
-  if (lit != litState) { litState = lit; stateDirty = true; dbg(lit ? "Room is lit" : "Room is dark"); }
+  if (lit != litState) { litState = lit; stateDirty = true; tankEvent(String(lit ? "Room is lit" : "Room is dark") + " (light sensor " + String(ldrRaw) + ")"); }
 }
 
 /* ------------------------------ alerts ----------------------------- */
 void buzzer(bool on) { digitalWrite(BUZZER_PIN, on ? HIGH : LOW); }
-void stopAlert() { alertNow = A_NONE; alertRule = -1; alertTest = false; alertOn = false; buzzer(false); stateDirty = true; }
+const char* SND_NAME[6] = { "chirp", "short beeps", "long beeps", "triple beep", "siren", "LEDs only" };
+const char* FLASH_NAME[6] = { "no flash", "green flash", "red flash", "blue flash", "white flash", "amber flash" };
+String ruleTxt(const AlarmRule& r) { return String(r.dir ? "drops to " : "rises to ") + String(r.level) + "%"; }
+String muteWhy() {                                       // why the buzzer would be silent right now ("" = it may sound)
+  if (!buzzerOn) return "buzzer switched off";
+  bool q = quietHours(), d = !roomLit();
+  switch (buzzMode) {
+    case 0: return "";
+    case 1: return q ? "quiet hours" : "";
+    case 2: return d ? "room is dark" : "";
+    default: return q && d ? "quiet hours and room is dark" : q ? "quiet hours" : d ? "room is dark" : "";
+  }
+}
+uint8_t silencedBy = 0;                                  // 1 button, 2 web app
+String alertName() { return alertTest ? String("Test") : "Alarm rule " + String(alertRule + 1) + " (" + ruleTxt(alertR) + ")"; }
+void stopAlert(const String& why) {
+  if (alertNow) tankEvent(alertName() + " ended: " + why + " - played " + String(alertRound) + " of " + String(alertR.repeats ? alertR.repeats : 1));
+  alertNow = A_NONE; alertRule = -1; alertTest = false; alertOn = false; buzzer(false); stateDirty = true;
+}
+bool alertAllowed = true;                                // last buzzer permission seen during this alarm (for the log)
 void startAlert(const AlarmRule& r, int8_t idx, bool test) {
   alertR = r; alertRule = idx; alertTest = test; alertNow = (test || r.dir == 0) ? A_FULL : A_LOW;
-  alertRound = 0; beepIdx = 0; alertOn = false; alertPhaseAt = millis(); alertWait = 0; silenced = false; stateDirty = true;
+  alertRound = 0; beepIdx = 0; alertOn = false; alertPhaseAt = millis(); alertWait = 0; silenced = false; silencedBy = 0; stateDirty = true;
+  String m = muteWhy(); alertAllowed = test || !m.length();
+  tankEvent(alertName() + (test ? String(" started") : " started at " + String(levelPct, 0) + "%") + ": " + SND_NAME[r.pattern < 6 ? r.pattern : 1] +
+            " x" + String(r.repeats ? r.repeats : 1) + ", " + FLASH_NAME[r.color < 6 ? r.color : 2] +
+            (r.pattern == 5 ? String("") : m.length() ? (test ? " (a real alarm now would be silent: " + m + ")" : " - buzzer silent: " + m) : String("")));
 }
 bool ruleHit(const AlarmRule& r)   { return r.dir == 0 ? levelPct >= r.level : levelPct <= r.level; }
-bool ruleClear(const AlarmRule& r) { return r.dir == 0 ? levelPct < r.level - 5 : levelPct > r.level + 5; }   // re-arm 5 % back
+bool ruleClear(const AlarmRule& r) { return r.dir == 0 ? levelPct < r.level - 5 : levelPct > r.level + 5; }   // 5 % back
+/* A rule starts only after 2 readings in a row at its mark (one stray reading can't start it), and once started it
+   always plays its full count - readings never stop it; only the button, Silence in the web app, or changing the
+   rule do. It re-arms after the level has stayed 5 % away for a minute, so a jumpy reading can't repeat it. */
+#define REARM_MS 60000
+uint8_t  ruleHits[6] = { 0 }; uint32_t ruleAwaySince[6] = { 0 };
 void alertTick() {
+  static uint32_t seenSeq = 0; bool fresh = measureSeq != seenSeq; seenSeq = measureSeq;
   if (!sensorOk) {
-    if (alertNow && !alertTest) stopAlert();
-    tstate = T_SENSOR;
+    tstate = T_SENSOR;                                   // an alarm already playing carries on
   } else {
     TankState s = levelPct >= fullPct ? T_FULL : levelPct <= lowPct ? T_LOW : T_NORMAL;
     if (s != tstate) { tstate = s; stateDirty = true; }
     // first good reading after a restart (power cut, update): a level we are ALREADY at doesn't sound an alarm -
     // a rule fires only when the level actually rises/drops into it
     static bool primed = false;
-    if (!primed) { primed = true; for (int i = 0; i < 6; ++i) ruleArmed[i] = !(rules[i].on && ruleHit(rules[i])); }
-    for (int i = 0; i < 6; ++i) {
-      const AlarmRule& r = rules[i]; if (!r.on) continue;
-      if (ruleClear(r)) ruleArmed[i] = true;
-      if (!alertNow && ruleArmed[i] && ruleHit(r)) { ruleArmed[i] = false; startAlert(r, i, false); dbg("ALERT: rule " + String(i + 1) + " at " + String(levelPct, 0) + "%"); }
-    }
-    if (alertNow && !alertTest && alertRule >= 0) {
-      const AlarmRule& r = rules[alertRule];
-      if (silenced || !r.on || !ruleHit(r)) { stopAlert(); return; }      // silenced, rule changed, or level moved away
+    if (!primed && fresh) { primed = true; for (int i = 0; i < 6; ++i) ruleArmed[i] = !(rules[i].on && ruleHit(rules[i])); }
+    if (primed && fresh) for (int i = 0; i < 6; ++i) {
+      const AlarmRule& r = rules[i]; if (!r.on) { ruleHits[i] = 0; ruleAwaySince[i] = 0; continue; }
+      if (ruleHit(r)) { ruleAwaySince[i] = 0; if (ruleHits[i] < 255) ruleHits[i]++; }
+      else {
+        ruleHits[i] = 0;
+        if (!ruleClear(r)) ruleAwaySince[i] = 0;
+        else if (!ruleAwaySince[i]) ruleAwaySince[i] = millis() | 1;
+        else if (!ruleArmed[i] && millis() - ruleAwaySince[i] >= REARM_MS) { ruleArmed[i] = true; dbg("Rule " + String(i + 1) + " re-armed"); }
+      }
+      if (!alertNow && ruleArmed[i] && ruleHits[i] >= 2) { ruleArmed[i] = false; startAlert(r, i, false); }
     }
   }
   if (!alertNow) return;
-  if (alertTest && silenced) { stopAlert(); return; }
+  if (silenced) { stopAlert(silencedBy == 2 ? "silenced from the web app" : "silenced with the button"); return; }
+  if (!alertTest && alertRule >= 0 && !rules[alertRule].on) { stopAlert("rule turned off"); return; }
   const Sound& snd = SOUNDS[alertR.pattern < 6 ? alertR.pattern : 1];
   if (millis() - alertPhaseAt < alertWait) return;
   alertPhaseAt = millis();
@@ -324,12 +364,16 @@ void alertTick() {
     alertOn = false; buzzer(false);
     if (++beepIdx >= snd.count) {
       beepIdx = 0;
-      if (++alertRound >= (alertR.repeats ? alertR.repeats : 1)) { stopAlert(); return; }
+      if (++alertRound >= (alertR.repeats ? alertR.repeats : 1)) { stopAlert("finished"); return; }
       alertWait = snd.off + snd.pause;
     } else alertWait = snd.off;
   } else {
     alertOn = true; alertWait = snd.on;
-    buzzer(alertR.pattern != 5 && (alertTest || buzzerAllowed()));   // quiet in a dark room / quiet hours; LEDs still flash
+    bool ok = alertTest || buzzerAllowed();
+    if (!alertTest && alertR.pattern != 5 && beepIdx == 0 && ok != alertAllowed) {   // quiet hours began / room went dark mid-alarm
+      alertAllowed = ok; tankEvent(alertName() + (ok ? String(": buzzer sounding again") : ": buzzer now silent - " + muteWhy()));
+    }
+    buzzer(alertR.pattern != 5 && ok);                   // quiet in a dark room / quiet hours; LEDs still flash
   }
 }
 
@@ -368,7 +412,7 @@ void buttonTick() {
   if (r == stable || millis() - changedAt < 40) return;
   stable = r;
   if (r == LOW) {                                         // pressed
-    if (alertNow) { silenced = true; dbg("Alert silenced by button"); }
+    if (alertNow) { silenced = true; silencedBy = 1; dbg("Alert silenced by button"); }
     btnFeedbackUntil = millis() + 400;
   }
 }
@@ -408,8 +452,24 @@ uint8_t statusLevel(uint32_t period, uint8_t peak) {     // the global status li
 }
 // colour channel ch (0 R, 1 G, 2 B) of colour value col at brightness k; never below the calibrated minimum while lit,
 // so a dim colour keeps all its parts instead of one of them rounding down to off
-uint8_t chanC(uint8_t col, uint8_t k, int ch) { if (!col || !k) return 0; int v = (col * k + 127) / 255; int m = minC[ch] ? minC[ch] : 1; return (uint8_t)min(255, max(v, m)); }
-uint8_t chan(uint8_t col, uint8_t k) { return chanC(col, k, 1); }
+/* colour (r,g,b) at brightness k with the colour calibration, keeping the colour's mix: when dim, the strongest
+   part is held at its minimum and the others follow in proportion; a part that would be far below its own minimum
+   goes off instead of jumping up (jumping up turned dim colours white / yellow / cyan). */
+uint32_t calColor(uint8_t r, uint8_t g, uint8_t b, int k) {
+  k = constrain(k, 0, 255); uint8_t c[3] = { r, g, b }, o[3] = { 0, 0, 0 };
+  int d = 0; for (int ch = 1; ch < 3; ++ch) if (c[ch] > c[d]) d = ch;
+  if (k && c[d]) {
+    float v[3]; for (int ch = 0; ch < 3; ++ch) v[ch] = c[ch] * k / 255.0f;
+    float md = minC[d] ? minC[d] : 1;
+    if (v[d] < md) { float s = md / v[d]; for (int ch = 0; ch < 3; ++ch) v[ch] *= s; }
+    for (int ch = 0; ch < 3; ++ch) {
+      if (!c[ch]) continue; float m = minC[ch] ? minC[ch] : 1;
+      if (v[ch] < m) v[ch] = v[ch] >= m * 0.5f ? m : 0;
+      o[ch] = (uint8_t)min(255.0f, v[ch] + 0.5f);
+    }
+  }
+  return strip.Color(o[0], o[1], o[2]);
+}
 int ldrBrightness(int ldr) {                             // light sensor -> level LED brightness with the calibration (dark room = off)
   int br = map(ldr, ldrMin, ldrMax, 1, 255); br = constrain(br, 0, 255); return br < 3 ? 0 : br;
 }
@@ -425,7 +485,7 @@ void ledTick() {
   if (dayNow && br < minBright) br = minBright;          // daytime: always show the level, dimly
   if (!dayNow && br > nightMax) br = nightMax;           // night: never brighter than this
   uint32_t c[NUM_LEDS]; for (int i = 0; i < NUM_LEDS; ++i) c[i] = 0;
-  auto scaled = [&](uint8_t r, uint8_t g, uint8_t b, int k) { k = constrain(k, 0, 255); return strip.Color(chanC(r, k, 0), chanC(g, k, 1), chanC(b, k, 2)); };
+  auto scaled = [&](uint8_t r, uint8_t g, uint8_t b, int k) { return calColor(r, g, b, k); };
 
   if (resetArmed()) {                                   // holding the button for a factory reset
     uint8_t lv = resetLevel(); for (int i = 0; i < NUM_LEDS; ++i) c[i] = strip.Color(lv, 0, 0);
@@ -467,10 +527,12 @@ void ledTick() {
     r = otaActive ? 0 : 1; g = 1; b = 1;
   }
   if (millis() >= identifyUntil && k) {
-    if (r == 255) c[STATUS_LED] = strip.Color(chanC(okCol[0], k, 0), chanC(okCol[1], k, 1), chanC(okCol[2], k, 2));
+    if (r == 255) c[STATUS_LED] = calColor(okCol[0], okCol[1], okCol[2], k);
     else c[STATUS_LED] = strip.Color(r * k, g * k, b * k);
   }
 
+  if (emMode && !otaActive && !restartAt && !resetArmed())                   // emergency light: the chosen colour, full power, day or night
+    c[STATUS_LED] = emOnNow() ? strip.Color(emCol[0], emCol[1], emCol[2]) : 0;
   if (ledTestOn()) {                                     // calibration test: every LED, the test colour, the test minimums
     auto t = [&](int ch) -> uint8_t { if (!testCol[ch]) return 0; int v = (testCol[ch] * testK + 127) / 255; return (uint8_t)min(255, max(v, (int)testMin[ch])); };
     uint32_t tc = strip.Color(t(0), t(1), t(2)); for (int i = 0; i < NUM_LEDS; ++i) c[i] = tc;
@@ -502,6 +564,21 @@ void sendHub(const void* body, size_t len) {                    // signed with o
   if (!hubKnown || !hasKey || !linked) return;
   uint8_t buf[250]; size_t n = leoSign(buf, body, len, key, nonce, ++txCtr);
   esp_now_send(hubMac, buf, n);
+}
+/* events for the hub's activity log (alarms, buzzer, room light, level sensor). Kept until we are linked (newest 8);
+   each is sent twice, the hub drops the repeat by its id. */
+char evq[8][64]; uint8_t evHead = 0, evCount = 0, evId = 0; uint32_t evLast = 0;
+void tankEvent(const String& s) {
+  dbg("EVENT: " + s);
+  if (evCount == 8) { evHead = (evHead + 1) % 8; evCount--; }
+  copyStr(evq[(evHead + evCount) % 8], 64, s.c_str()); evCount++;
+}
+void eventTick() {
+  if (!evCount || !linked || otaActive || millis() - evLast < 120) return;
+  evLast = millis();
+  MsgEvent m = {}; fillHdr(m.h, M_EVENT); m.id = ++evId; copyStr(m.text, sizeof(m.text), evq[evHead]);
+  sendHub(&m, sizeof(m)); delay(8); sendHub(&m, sizeof(m));
+  evHead = (evHead + 1) % 8; evCount--;
 }
 void sendHello(const uint8_t* to) {
   MsgHello m = {}; fillHdr(m.h, M_HELLO);
@@ -642,9 +719,15 @@ void handleCmd(const MsgCmd& c) {
     case C_UNPAIR:   forgetHub("hub asked us to forget it"); break;
     case C_TANK_SET: applySetting(c.idx, c.f); break;
     case C_LEDTEST:  { char t[25]; memcpy(t, c.text, 24); t[24] = 0; ledTestCmd(c.idx, c.f, t); } break;
-    case C_SILENCE:  if (alertNow) { silenced = true; dbg("Alert silenced from the web app"); } break;
-    case C_BEEP:
-      if (c.idx >= 1 && c.idx <= 6) { if (!alertNow || alertTest) { AlarmRule t = { 1, 0, 0, (uint8_t)(c.idx - 1), 1, (uint8_t)(c.val < 6 ? c.val : 0) }; startAlert(t, -1, true); } }
+    case C_SILENCE:  if (alertNow) { silenced = true; silencedBy = 2; dbg("Alert silenced from the web app"); } break;
+    case C_BEEP:     // test a rule: idx = sound + 1, val = flash colour, f = how many times (hub 2.9+; older hubs: once)
+      if (c.idx >= 1 && c.idx <= 6) {
+        if (!alertNow || alertTest) {
+          if (alertNow) stopAlert("replaced by a new test");
+          uint8_t n = c.f >= 1 && c.f <= 30 ? (uint8_t)c.f : 1;
+          AlarmRule t = { 1, 0, 0, (uint8_t)(c.idx - 1), n, (uint8_t)(c.val < 6 ? c.val : 0) }; startAlert(t, -1, true);
+        } else tankEvent("Test not played: " + alertName() + " is sounding");
+      }
       else { buzzer(true); beepUntil = millis() + 150; }
       break;
     case C_TANK_RULE:
@@ -653,7 +736,8 @@ void handleCmd(const MsgCmd& c) {
         r.on = r.on ? 1 : 0; if (r.level > 100) r.level = 100; r.dir = r.dir ? 1 : 0;
         if (r.pattern > 5) r.pattern = 1; if (r.repeats < 1) r.repeats = 1; if (r.repeats > 30) r.repeats = 30; if (r.color > 5) r.color = 2;
         rules[c.idx] = r; ruleArmed[c.idx] = !ruleHit(r);              // don't fire at once for a level we're already at
-        if (alertRule == (int8_t)c.idx) stopAlert();
+        if (alertRule == (int8_t)c.idx) stopAlert("rule changed");
+        ruleHits[c.idx] = 0; ruleAwaySince[c.idx] = 0;
         prefs.putBytes("rules", rules, sizeof(rules)); sendTankRules();
         dbg("Rule " + String(c.idx + 1) + " saved");
       } break;
@@ -694,7 +778,7 @@ void handlePacket(const RxItem& it) {
   rxCtr = ctr; lastVerified = millis();
 
   if (h->type == M_PING) {
-    if (blen >= sizeof(LeoHdr) + 2) { MsgPing p = {}; memcpy(&p, it.data, min(blen, sizeof(p))); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } if (blen >= offsetof(MsgPing, g)) beatSync(p.beat); if (blen >= offsetof(MsgPing, ledStyle) && p.g == 1) { havePingStyle = blen >= offsetof(MsgPing, minR); havePingCal = blen >= sizeof(MsgPing); applyGlobals(p); } }
+    if (blen >= sizeof(LeoHdr) + 2) { MsgPing p = {}; memcpy(&p, it.data, min(blen, sizeof(p))); if (p.mins >= 0 && p.mins < 1440) { hubMins = p.mins; hubMinsAt = millis(); } if (blen >= offsetof(MsgPing, g)) beatSync(p.beat); if (blen >= offsetof(MsgPing, ledStyle) && p.g == 1) { havePingStyle = blen >= offsetof(MsgPing, minR); havePingCal = blen >= offsetof(MsgPing, emMode); applyGlobals(p); } if (blen >= sizeof(MsgPing)) { emMode = p.emMode <= 3 ? p.emMode : 0; emCol[0] = p.emR; emCol[1] = p.emG; emCol[2] = p.emB; } }
     return;
   }
   if (h->type == M_CMD && blen >= sizeof(MsgCmd)) { MsgCmd c; memcpy(&c, it.data, sizeof(c)); handleCmd(c); return; }
@@ -847,6 +931,7 @@ void loop() {
     alertTick();
     ledTick();
   }
+  eventTick();
   if (beepUntil && (int32_t)(millis() - beepUntil) >= 0) { beepUntil = 0; if (!alertOn) buzzer(false); }
   if (linked && !otaActive && (stateDirty || millis() - lastState >= STATE_MS)) sendState();
   statusPrint();

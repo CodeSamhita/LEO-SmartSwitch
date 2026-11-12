@@ -45,7 +45,7 @@
 #include <time.h>
 #include <vector>
 
-#define HUB_FW            "2.8.0"
+#define HUB_FW            "2.9.0"
 #define HUB_MDNS          "leohub"
 #define MAX_DEV           16
 #define OFFLINE_MS        9000      // edge counted offline after this long without a verified packet
@@ -69,7 +69,7 @@
 #define LEO_MAGIC  0x4C45
 #define LEO_PROTO  2
 enum : uint8_t { M_HELLO = 1, M_WELCOME = 2, M_SW_STATE = 3, M_SW_INFO = 4, M_TANK_STATE = 5, M_TANK_INFO = 6,
-                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16 };
+                 M_CMD = 7, M_OTA_BEGIN = 10, M_OTA_DATA = 11, M_OTA_END = 12, M_OTA_ACK = 13, M_PING = 14, M_DIAG = 15, M_TANK_RULES = 16, M_EVENT = 17 };   // M_EVENT: edge -> hub, a line for the activity log
 enum : uint8_t { DEV_SWITCH = 1, DEV_TANK = 2 };
 enum : uint8_t { C_RELAY = 1, C_ALL = 2, C_IDENTIFY = 3, C_RENAME = 4, C_RELAY_META = 5, C_REBOOT = 6, C_INFO = 7, C_UNPAIR = 8, C_TOUCH = 9,
                  C_TANK_SET = 10, C_SILENCE = 11, C_BEEP = 12, C_FACTORY = 13, C_TANK_RULE = 14, C_SW_SET = 15, C_LEDTEST = 16 };   // C_FACTORY: wipe all settings + pairing, restart; C_TANK_RULE: idx = rule 0..5, text[0..5] = on,level,dir,pattern,repeats,color; C_BEEP idx>0 = play sound pattern idx-1 once   // C_TANK_SET: idx 1 fullCm 2 emptyCm 3 fullPct 4 lowPct 5 buzzer 6 quietFrom 7 quietTo 8 palette 9 ledCount 10 showFrom 11 showTo 12 minBright 13..20 custom colour of LED 1..8 (0xRRGGBB) 21 current-level highlight 0..50 % 22..29 colour-matching brightness of LED 1..8 (10..100 %) 30 light all level LEDs for f seconds (0 = stop), value in f
@@ -79,12 +79,14 @@ struct __attribute__((packed)) MsgHello    { LeoHdr h; uint32_t nonce; uint8_t h
 struct __attribute__((packed)) MsgWelcome  { LeoHdr h; uint8_t channel; uint8_t keyIncluded; uint8_t key[16]; char hubName[24]; };
 struct __attribute__((packed)) MsgPing     { LeoHdr h; int16_t mins; uint8_t room; uint16_t beat;
                                               uint8_t g; uint8_t quietFrom, quietTo, dayFrom, dayTo, ledDay, ledNight; uint16_t litOn, litOff;
-                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; uint8_t minR, minG, minB; };   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
+                                              uint8_t ledStyle; uint16_t ledPeriod; uint8_t okR, okG, okB; uint8_t minR, minG, minB;
+                                              uint8_t emMode, emR, emG, emB; };   // emergency light on the status LED (hub 2.9+): 0 off, 1 steady, 2 strobe, 3 slow flash; full brightness, day or night   // status light: style 0 breath 1 blink 2 double blink 3 steady 4 off; period ms (divides 10000); colour when all is well (hub 2.1+)   // g = 1: global home settings follow (hub 2.0+)   // beat: hub millis() % 10000 when sent (LED breathing sync)   // mins: hub local time (-1 unknown); room: 1 lit, 0 dark, 255 unknown (from the tank's LDR)
 struct __attribute__((packed)) MsgSwState  { LeoHdr h; uint8_t n; uint8_t onMask; uint32_t uptime; uint32_t onSecs[4]; };
 struct __attribute__((packed)) MsgSwInfo   { LeoHdr h; char name[24]; char fw[16]; uint8_t n; char rname[4][20]; float watts[4]; uint8_t gpio[4]; uint8_t touch; uint8_t mode[4]; uint16_t pulseMs[4]; uint8_t activeHigh[4]; uint8_t tmap[4]; uint8_t tact[4]; };   // touch: 1 = touch buttons enabled (switch 2.2+)
 struct __attribute__((packed)) MsgTankState{ LeoHdr h; float levelPct; float distCm; uint8_t leds; uint8_t state; uint8_t sensorOk; uint8_t flags; uint32_t uptime; char stateTxt[24]; uint16_t ldr; };   // ldr: room light 0..4095 (tank 1.1+)
 struct __attribute__((packed)) MsgTankInfo { LeoHdr h; float fullCm; float emptyCm; uint8_t fullPct; uint8_t lowPct; uint8_t buzzer; uint8_t quietFrom; uint8_t quietTo; uint8_t palette; uint8_t ledCount; uint8_t showFrom; uint8_t showTo; uint8_t minBright; uint8_t colors[24]; uint8_t highlight; uint8_t gain[8]; uint16_t ldrMin; uint16_t ldrMax; uint8_t buzzMode; uint8_t nightMax; };   // tank settings (palette 0 red-blue, 1 red-green, 2 custom = colors[] RGB x8, bottom first)
 struct __attribute__((packed)) MsgTankRules { LeoHdr h; uint8_t count; uint8_t r[6][6]; };   // alarm rules: on, level %, dir (0 rises to, 1 drops to), pattern, repeats, colour
+struct __attribute__((packed)) MsgEvent    { LeoHdr h; uint8_t id; char text[64]; };   // id counts up per event (hub drops repeats)
 struct __attribute__((packed)) MsgDiag     { LeoHdr h; int16_t tempC10; uint32_t heapFree; uint32_t heapMin; uint32_t fsUsed; uint32_t fsTotal; uint32_t flashSize; uint32_t sketchSize; uint32_t sketchMax; uint8_t resetReason; uint8_t cpuMHz; char sdk[16]; };   // chip details for the Advanced view
 struct __attribute__((packed)) MsgCmd      { LeoHdr h; uint8_t cmd; uint8_t idx; uint8_t val; float f; char text[24]; };
 struct __attribute__((packed)) MsgOtaBegin { LeoHdr h; uint32_t size; };
@@ -108,6 +110,9 @@ struct Dev {
   uint32_t session;      // edge's nonce from its latest HELLO (0 = unknown since hub boot)
   uint32_t txCtr, rxCtr;
   uint32_t lastSeen;     // millis of last VERIFIED packet
+  uint8_t  evId; bool evSeen;   // last event id from the edge (repeats dropped)
+  uint32_t offSince;     // millis it went offline (0 = online / never seen)
+  bool     em;           // included in the emergency light
   uint32_t lastPing;
   bool     pingRetry;                     // last packet to it was not acknowledged: ping again soon
   uint8_t  failRun;                       // unacknowledged packets in a row
@@ -182,6 +187,10 @@ AsyncWebServer server(80);
    serves ONLY a level page and its numbers - no settings, no controls, no device list. Can be switched off. */
 AsyncWebServer viewServer(8080);
 bool gViewOn = true;
+uint8_t emMode = 0, emCol[3] = { 255, 0, 0 };   // emergency light on every chosen status LED: 0 off, 1 steady, 2 strobe, 3 slow flash (not saved)
+bool emHub = true;                              // the hub's own status LED joins in
+bool emChosen = false;                          // devices picked yet? (until then: every device)
+uint32_t loopGap = 0, loopGapAt = 0, rxDrops = 0; // worst loop() pause in the last 30 s, ESP-NOW packets dropped (queue full)
 const char VIEW_HTML[] PROGMEM = R"VIEW(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Water tank</title><meta name="theme-color" content="#0c0f12"><style>
 :root{--bg:#0c0f12;--s1:#151b21;--line:#25303a;--txt:#e8eef3;--mut:#7d8b97;--acc:#4aa8ff}
@@ -617,7 +626,7 @@ void onRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
   if (len < (int)sizeof(LeoHdr) || len > 250) return;
   RxItem it; memcpy(it.mac, info->src_addr, 6);
   it.rssi = info->rx_ctrl ? info->rx_ctrl->rssi : 0; it.len = (uint8_t)len; memcpy(it.data, data, len);
-  xQueueSend(rxq, &it, 0);
+  if (xQueueSend(rxq, &it, 0) != pdTRUE) rxDrops++;
 }
 void onSent(const esp_now_send_info_t* info, esp_now_send_status_t st) {   // radio-level ACK from the edge
   if (!info || !info->des_addr) return;
@@ -721,7 +730,7 @@ void handleHello(const RxItem& it) {
         ", " + String(it.rssi) + "dBm, ch " + String(WiFi.channel());
     }
     d.type = devType; copyStr(d.fw, sizeof(d.fw), m.fw);
-    d.session = m.nonce; d.txCtr = 0; d.rxCtr = 0; d.rssi = it.rssi;
+    d.session = m.nonce; d.txCtr = 0; d.rxCtr = 0; d.rssi = it.rssi; d.evSeen = false;
     d.txSent = 0; d.txFail = 0; d.pingRetry = false; d.failRun = 0;
     memcpy(key, d.key, 16);
   }
@@ -785,6 +794,8 @@ void handlePacket(const RxItem& it) {
     d.infoKnown = true; stateDirty = true;
   } else if (h->type == M_TANK_STATE && blen >= sizeof(MsgTankState) - 2) {   // tank 1.0 has no 'ldr'
     MsgTankState m = {}; memcpy(&m, it.data, min(blen, sizeof(m)));
+    { bool rs; String dn; { DevGuard g; rs = devs[i].uptime > 10 && m.uptime + 5 < devs[i].uptime; dn = devs[i].name; }
+      if (rs) activity(dn + " restarted (power cut or crash?) - was up " + String(devs[i].uptime / 60) + " min", false); }
     DevGuard g; Dev& d = devs[i];
     d.ldr = blen >= sizeof(MsgTankState) ? m.ldr : 0xFFFF;
     if (d.ldr != 0xFFFF) ldrTrack(d.ldr);
@@ -810,6 +821,10 @@ void handlePacket(const RxItem& it) {
   } else if (h->type == M_TANK_RULES && blen >= sizeof(MsgTankRules)) {
     MsgTankRules m; memcpy(&m, it.data, sizeof(m));
     DevGuard g; Dev& d = devs[i]; memcpy(d.tRules, m.r, sizeof(d.tRules)); d.tRulesKnown = true; stateDirty = true;
+  } else if (h->type == M_EVENT && blen >= sizeof(MsgEvent)) {   // a line for the activity log from the edge
+    MsgEvent m; memcpy(&m, it.data, sizeof(m)); m.text[sizeof(m.text) - 1] = 0;
+    bool dup; String dn; { DevGuard g; Dev& d = devs[i]; dup = d.evSeen && d.evId == m.id; d.evId = m.id; d.evSeen = true; dn = d.name; }
+    if (!dup) activity(dn + ": " + String(m.text), false);
   } else if (h->type == M_DIAG && blen >= sizeof(MsgDiag)) {
     MsgDiag m; memcpy(&m, it.data, sizeof(m));
     DevGuard g; Dev& d = devs[i];
@@ -903,6 +918,8 @@ String stateJson() {
     g["ledDay"] = gLedDay; g["ledNight"] = gLedNight; g["litOn"] = gLitOn; g["litOff"] = gLitOff;
     g["ledStyle"] = gLedStyle; g["ledPeriod"] = gLedPeriod; char hx[8]; snprintf(hx, sizeof(hx), "#%02x%02x%02x", gOk[0], gOk[1], gOk[2]); g["okColor"] = hx;
     g["priceDay"] = gPriceDay; g["priceNight"] = gPriceNight; g["minR"] = gMin[0]; g["minG"] = gMin[1]; g["minB"] = gMin[2]; g["viewOn"] = gViewOn; }
+  { JsonObject e = h["emer"].to<JsonObject>(); e["mode"] = emMode; char hx[8]; snprintf(hx, sizeof(hx), "#%02x%02x%02x", emCol[0], emCol[1], emCol[2]); e["color"] = hx; e["hub"] = emHub;
+    JsonArray m = e["macs"].to<JsonArray>(); DevGuard g; for (int i = 0; i < MAX_DEV; ++i) if (devs[i].used && (!emChosen || devs[i].em)) m.add(macStr(devs[i].mac)); }
   if (pendingAt && millis() - pendingAt < 30000) h["pending"] = macStr(pendingMac);   // asking to join in the last 30 s
   h["wifi"] = (WiFi.status() == WL_CONNECTED); h["ip"] = WiFi.localIP().toString();
   h["ap"] = apUp ? apSsid() : String("");
@@ -1165,6 +1182,9 @@ static const char INDEX_HTML[] PROGMEM =
   ".act{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed #1e2731;font-size:13px}\n"
   ".act time{color:var(--mut);font-variant-numeric:tabular-nums;flex:0 0 auto;min-width:118px}\n"
   ".act.blocked{color:var(--warn)}\n"
+  ".chips{display:flex;flex-wrap:wrap;gap:6px}.chip{padding:6px 11px;border-radius:999px;border:1px solid var(--line);background:var(--s2);color:var(--txt);font-size:12.5px;font-weight:600}\n"
+  ".chip.sel{background:var(--acc);border-color:var(--acc);color:#06231e}\n"
+  ".emsw{width:30px;height:30px;border-radius:50%;border:2px solid var(--line);flex:0 0 auto}.emsw.sel{border-color:var(--txt);box-shadow:0 0 0 2px var(--acc)}\n"
   ".toast{position:fixed;left:50%;bottom:calc(var(--navh) + 14px);transform:translateX(-50%);background:var(--s2);border:1px solid var(--line);padding:9px 14px;border-radius:12px;font-size:13px;display:none;z-index:60}\n"
   ".switchrow{display:flex;align-items:center;gap:10px;margin-top:6px}\n"
   ".switchrow span{flex:1}\n"
@@ -1252,6 +1272,7 @@ static const char INDEX_HTML[] PROGMEM =
   "\n"
   "  <section class=\"page active\" id=\"p-home\">\n"
   "    <div class=\"grid\" id=\"cards\"></div>\n"
+  "    <div id=\"emer\" style=\"margin-top:12px\"></div>\n"
   "  </section>\n"
   "\n"
   "  <section class=\"page\" id=\"p-devices\">\n"
@@ -1271,6 +1292,8 @@ static const char INDEX_HTML[] PROGMEM =
   "\n"
   "  <section class=\"page\" id=\"p-activity\">\n"
   "    <div class=\"row\" style=\"margin:0 0 10px\"><button class=\"btn\" onclick=\"loadActivity()\">Refresh</button><button class=\"btn d\" onclick=\"clearActivity()\">Clear log</button></div>\n"
+  "    <div class=\"card\" style=\"margin-bottom:10px\"><div class=\"chips\" id=\"actKinds\"></div><div class=\"chips\" id=\"actDevs\" style=\"margin-top:8px\"></div>\n"
+  "      <input id=\"actText\" placeholder=\"Search the log…\" style=\"margin-top:8px\" oninput=\"clearTimeout(actT);actT=setTimeout(loadActivity,350)\"><div class=\"note\" id=\"actCount\" style=\"margin-top:6px\"></div></div>\n"
   "    <div class=\"card\" id=\"actlist\"><div class=\"meta\">Loading…</div></div>\n"
   "  </section>\n"
   "\n"
@@ -1430,7 +1453,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  $('#banners').innerHTML=b;\n"
   "  const pb=$('#pairbtn');if(pb)pb.textContent=h.pairing>0?('Waiting for the new device… '+h.pairing+'s'):'Start adding (2 minutes)';\n"
   "  const pm=$('#pairmsg');if(pm){if(h.pairing>0&&pairBase){const nw=S.devices.filter(d=>!pairBase.includes(d.mac));pm.innerHTML=nw.length?('✅ Added: '+nw.map(d=>'<b>'+esc(d.name)+'</b>').join(', ')):'Looking for new devices…'}else if(!h.pairing)pairBase=null}\n"
-  "  if(page==='home')renderHome();\n"
+  "  if(page==='home'){renderHome();renderEmer()}\n"
   "  if(page==='devices')renderDevices();\n"
   "  if(page==='hub'){renderLock();renderHomeSet();renderView()}\n"
   "  if(page==='tank')renderTank();\n"
@@ -1457,7 +1480,23 @@ static const char INDEX_HTML[] PROGMEM =
   "        <div class=\"meta\" style=\"margin-top:8px\">${meta}</div></div>`}\n"
   "    return `<div class=\"card\"><div class=\"chead\">${st}<span class=\"nm\">${esc(d.name)}</span></div><div class=\"meta\">Unknown device type</div></div>`}).join('');\n"
   "}\n"
-  "async function tog(el,mac,i,on){el.classList.toggle('on',on);if(!await cmd(mac,1,{idx:i,val:on?1:0}))el.classList.toggle('on',!on)}\n"
+  "/* emergency light: every chosen status LED at full power in one colour, applies on tap */\n"
+  "let emKey='',emLast=2;const EMC=['#ff0000','#ffffff','#0000ff','#ff8c00','#00ff00','#ff00ff'];\n"
+  "function renderEmer(){const box=$('#emer'),e=(S.hub||{}).emer;if(!box||!e)return;\n"
+  "  const key=JSON.stringify(e)+S.devices.map(d=>d.mac+d.name+d.online).join();if(key===emKey)return;emKey=key;\n"
+  "  const on=e.mode>0,macs=e.macs,hubOn=e.hub!==false;if(on)emLast=e.mode;\n"
+  "  const st=[[1,'Steady'],[2,'Strobe'],[3,'Slow flash']];\n"
+  "  box.innerHTML=`<div class=\"card\"><div class=\"chead\"><span class=\"nm\">🚨 Emergency light</span><button class=\"tgl ${on?'on':''}\" onclick=\"emSet({mode:${on?0:emLast}})\"></button></div>\n"
+  "    <div class=\"row\" style=\"margin:8px 0 0\">${st.map(s=>`<button class=\"btn ${on&&e.mode===s[0]?'p':''}\" onclick=\"emSet({mode:${s[0]}})\">${s[1]}</button>`).join('')}</div>\n"
+  "    <label>Colour</label><div style=\"display:flex;gap:8px;align-items:center;flex-wrap:wrap\">${EMC.map(c=>`<button class=\"emsw ${e.color===c?'sel':''}\" style=\"background:${c}\" onclick=\"emSet({color:'${c}'})\"></button>`).join('')}\n"
+  "      <input type=\"color\" value=\"${e.color}\" style=\"width:54px;height:34px;padding:2px\" onchange=\"emSet({color:this.value})\"></div>\n"
+  "    <label>Status lights on</label><div class=\"chips\"><button class=\"chip ${hubOn?'sel':''}\" onclick=\"emSet({hub:${!hubOn}})\">Hub</button>${S.devices.map(d=>`<button class=\"chip ${macs.includes(d.mac)?'sel':''}\" onclick=\"emDev('${d.mac}')\">${esc(d.name)}${d.online?'':' (offline)'}</button>`).join('')}</div>\n"
+  "    <div class=\"note\" style=\"margin-top:8px\">${on?'On now — full brightness, day or night. A device that restarts stays dark until it hears the hub.':'Off. Pick a style to switch it on.'}</div></div>`}\n"
+  "function emMacs(){return S.hub.emer.macs.slice()}\n"
+  "function emDev(mac){const m=emMacs(),i=m.indexOf(mac);if(i>=0)m.splice(i,1);else m.push(mac);emPost({macs:m})}\n"
+  "function emSet(o){if(!o||!Object.keys(o).length)return {};return emPost(Object.assign({macs:emMacs()},o))}\n"
+  "async function emPost(o){const e=S.hub.emer;Object.assign(e,o.mode!==undefined?{mode:o.mode}:{},o.color?{color:o.color}:{},o.hub!==undefined?{hub:o.hub}:{},o.macs?{macs:o.macs}:{});emKey='';renderEmer();\n"
+  "  if(!await post('/api/emergency',o))toast('Could not reach the hub')}\n"  "async function tog(el,mac,i,on){el.classList.toggle('on',on);if(!await cmd(mac,1,{idx:i,val:on?1:0}))el.classList.toggle('on',!on)}\n"
   "async function everything(on){for(const d of S.devices)if(d.type==='switch'&&d.online)await cmd(d.mac,2,{val:on?1:0})}\n"
   "let pairBase=null;\n"
   "async function openPairing(){pairBase=S.devices.map(d=>d.mac);if(await post('/api/pairing',{secs:120}))toast('Adding devices for 2 minutes — power the new one on now')}\n"
@@ -1502,7 +1541,13 @@ static const char INDEX_HTML[] PROGMEM =
   "  upload('/api/edge-ota?mac='+encodeURIComponent(mac),f,bar,msg,(ok,e)=>{delete c.dataset.uploading;msg.textContent=ok?'Sending to device over ESP-NOW…':('Failed: '+(e||'error'))})}\n"
   "\n"
   "/* activity */\n"
-  "async function loadActivity(){const a=await jget('/api/activity');if(!a)return;\n"
+  "const ACT_KINDS=[['All',''],['Alarms & buzzer','alarm|test|buzzer|silenced'],['Online / offline','offline|back online|restarted'],['Relays',' on (| off (| on,| off,|(timer)|changed at the device'],['Room & sensor','room is|level sensor'],['Settings','set to|settings|rule |colour|marked|output|touch pad|timer:|calibration|night lock|password|wifi|firmware|emergency|forgot|paired'],['Blocked','!b']];\n"
+  "let actKind=0,actDev='',actT=null;\n"
+  "function actChips(){$('#actKinds').innerHTML=ACT_KINDS.map((k,i)=>`<button class=\"chip ${i===actKind?'sel':''}\" onclick=\"actKind=${i};loadActivity()\">${k[0]}</button>`).join('');\n"
+  "  const ds=[['All devices',''],['Hub','hub']].concat(S.devices.map(d=>[d.name,d.name.toLowerCase()]));\n"
+  "  $('#actDevs').innerHTML=ds.map(d=>`<button class=\"chip ${d[1]===actDev?'sel':''}\" onclick=\"actDev='${esc(d[1]).replace(/'/g,'')}';loadActivity()\">${esc(d[0])}</button>`).join('')}\n"
+  "async function loadActivity(){actChips();const k=ACT_KINDS[actKind][1],qs=new URLSearchParams();if(k==='!b')qs.set('blocked','1');else if(k)qs.set('q',k);if(actDev)qs.set('dev',actDev);const tx=($('#actText').value||'').trim().toLowerCase();if(tx)qs.set('text',tx);\n"
+  "  const a=await jget('/api/activity?'+qs);if(!a)return;$('#actCount').textContent=(k||actDev||tx)?(a.items.length+(a.items.length>=300?'+':'')+' of '+a.total+' entries match'):(a.total+' entries');\n"
   "  $('#actlist').innerHTML=a.items.length?a.items.map(x=>`<div class=\"act ${x.blocked?'blocked':''}\"><time>${x.t?((d,p)=>`${p(d.getFullYear()%100)}-${p(d.getMonth()+1)}-${p(d.getDate())} ${hm(d,1)}`)(new Date(x.t*1000),n=>String(n).padStart(2,'0')):'(clock not set)'}</time><span>${esc(x.msg)}</span></div>`).join(''):'<div class=\"meta\">Nothing recorded yet.</div>'}\n"
   "\n"
   "/* hub page */\n"
@@ -1822,7 +1867,7 @@ static const char INDEX_HTML[] PROGMEM =
   "  return {on:g('on').classList.contains('on'),dir:+g('dir').value,level:Math.round(+g('level').value),pattern:+g('pattern').value,repeats:Math.round(+g('repeats').value),color:+g('color').value}}\n"
   "async function saveRule(i){const v=ruleVals(i);if(!(v.level>=0&&v.level<=100)){toast('Level must be 0–100 %');return}if(!(v.repeats>=1&&v.repeats<=30)){toast('Times must be 1–30');return}\n"
   "  if(await post('/api/tankrule',Object.assign({mac:tankMac,idx:i},v)))toast('Rule '+(i+1)+' sent')}\n"
-  "async function testRule(i){const v=ruleVals(i);if(await cmd(tankMac,12,{idx:v.pattern+1,val:v.color}))toast('Playing '+SNDS[v.pattern])}\n"
+  "async function testRule(i){const v=ruleVals(i);if(await cmd(tankMac,12,{idx:v.pattern+1,val:v.color,f:v.repeats}))toast('Playing '+SNDS[v.pattern]+' x'+v.repeats)}\n"
   "async function saveAlarms(){const d=tankDev(),c=d.tank.cfg,fp=Math.round(+$('#tFp').value),lp=Math.round(+$('#tLp').value),m=$('#almsg');\n"
   "  if(!(fp<=100&&lp>=0&&fp-lp>10)){m.textContent='\"Full\" must be more than 10 % above \"Low\".';return}\n"
   "  m.textContent='Saving…';\n"
@@ -2293,8 +2338,21 @@ void webBegin() {
     File f = LittleFS.open(ACT_FILE, "r");
     if (f) { while (f.available()) { String l = f.readStringUntil('\n'); l.trim(); if (l.length()) lines.push_back(l); } f.close(); }
     xSemaphoreGive(actLock);
-    String s = "{\"items\":["; int n = 0;
-    for (int i = (int)lines.size() - 1; i >= 0 && n < 200; --i, ++n) { if (n) s += ","; s += lines[i]; }
+    // filters (all optional, lower case): q = words, any of them (split by |); dev = device name; text = free text; blocked=1
+    auto prm = [&](const char* k) { String v = r->hasParam(k) ? r->getParam(k)->value() : String(""); v.toLowerCase(); return v; };
+    String q = prm("q"), dv = prm("dev"), tx = prm("text"); bool bl = prm("blocked") == "1";
+    std::vector<String> qs; { int a = 0; while (q.length() && a <= (int)q.length()) { int b = q.indexOf('|', a); if (b < 0) b = q.length(); if (b > a) qs.push_back(q.substring(a, b)); a = b + 1; } }
+    String s = "{\"total\":" + String(lines.size()) + ",\"items\":["; int n = 0;
+    for (int i = (int)lines.size() - 1; i >= 0 && n < 300; --i) {
+      if (qs.size() || dv.length() || tx.length() || bl) {
+        String l = lines[i]; l.toLowerCase();
+        if (bl && l.indexOf("\"blocked\":true") < 0) continue;
+        if (dv.length() && l.indexOf(dv) < 0) continue;
+        if (tx.length() && l.indexOf(tx) < 0) continue;
+        if (qs.size()) { bool any = false; for (auto& w : qs) if (l.indexOf(w) >= 0) { any = true; break; } if (!any) continue; }
+      }
+      if (n++) s += ","; s += lines[i];
+    }
     s += "]}"; r->send(200, "application/json", s);
   });
 
@@ -2478,8 +2536,25 @@ void webBegin() {
     static const char* styles[] = { "breath", "blink", "double blink", "steady", "off" };
     char buf[220]; snprintf(buf, sizeof(buf), "Home settings: quiet %s-%s, daytime %s-%s, status light %d/%d (of 255) %s every %.1f s #%06lx, room bright above %d / dark below %d",
                             hm12(qf * 60).c_str(), hm12(qt * 60).c_str(), hm12(df * 60).c_str(), hm12(dt * 60).c_str(), ld, ln, styles[ls], lp / 1000.0, (unsigned long)okc, lon, loff);
-    activity(String(buf) + " (from " + who(r) + ")", false);
+    activity(String(buf) + ", colour minimums R" + String(gMin[0]) + " G" + String(gMin[1]) + " B" + String(gMin[2]) + " (from " + who(r) + ")", false);
     jsonOk(r);
+  }));
+  server.addHandler(new AsyncCallbackJsonWebHandler("/api/emergency", [](AsyncWebServerRequest* r, JsonVariant& j) {   // emergency light
+    if (!guard(r)) return;
+    int mode = j["mode"] | (int)emMode; if (mode < 0 || mode > 3) { r->send(400, "application/json", "{\"err\":\"mode\"}"); return; }
+    if (j["color"].is<const char*>()) { const char* s = j["color"]; if (s[0] == '#' && strlen(s) == 7) { long v = strtol(s + 1, nullptr, 16); emCol[0] = (v >> 16) & 255; emCol[1] = (v >> 8) & 255; emCol[2] = v & 255; } }
+    if (j["hub"].is<bool>()) emHub = j["hub"].as<bool>();
+    if (j["macs"].is<JsonArray>()) {
+      emChosen = true; DevGuard g; for (int i = 0; i < MAX_DEV; ++i) devs[i].em = false;
+      for (JsonVariant v : j["macs"].as<JsonArray>()) { uint8_t m[6]; if (v.is<const char*>() && parseMac(v.as<const char*>(), m)) { int k = findDev(m); if (k >= 0) devs[k].em = true; } }
+    }
+    bool was = emMode; emMode = mode;
+    { DevGuard g; for (int i = 0; i < MAX_DEV; ++i) devs[i].lastPing = 0; }   // tell every device now
+    static const char* mn[] = { "off", "steady", "strobe", "slow flash" };
+    String who2; { DevGuard g; for (int i = 0; i < MAX_DEV; ++i) if (devs[i].used && (!emChosen || devs[i].em)) who2 += (who2.length() ? ", " : "") + String(devs[i].name); }
+    char hx[8]; snprintf(hx, sizeof(hx), "#%02x%02x%02x", emCol[0], emCol[1], emCol[2]);
+    if (mode || was) activity(String("Emergency light ") + (mode ? String(mn[mode]) + " " + hx + " on " + (emHub ? (who2.length() ? "hub, " + who2 : String("hub")) : (who2.length() ? who2 : String("no device"))) : String("off")) + " (from " + who(r) + ")", false);
+    stateDirty = true; jsonOk(r);
   }));
   server.addHandler(new AsyncCallbackJsonWebHandler("/api/tankrule", [](AsyncWebServerRequest* r, JsonVariant& j) {
     if (!guard(r)) return;
@@ -2731,6 +2806,23 @@ void setup() {
      amber  every 2 s : WiFi lost / still connecting
      blue   every 2 s : emergency hotspot is on
    Peak 5/255 when the room is lit, 2/255 when dark (room light from the tank's LDR, else the clock). */
+/* colour at brightness k with the colour calibration, keeping its mix: when dim, the strongest part is held at its
+   minimum and the others follow in proportion; a part far below its own minimum goes off instead of jumping up */
+uint32_t calColor(uint8_t r, uint8_t g, uint8_t b, int k) {
+  k = constrain(k, 0, 255); uint8_t c[3] = { r, g, b }, o[3] = { 0, 0, 0 };
+  int d = 0; for (int q = 1; q < 3; ++q) if (c[q] > c[d]) d = q;
+  if (k && c[d]) {
+    float v[3]; for (int q = 0; q < 3; ++q) v[q] = c[q] * k / 255.0f;
+    float md = gMin[d] ? gMin[d] : 1;
+    if (v[d] < md) { float s = md / v[d]; for (int q = 0; q < 3; ++q) v[q] *= s; }
+    for (int q = 0; q < 3; ++q) {
+      if (!c[q]) continue; float m = gMin[q] ? gMin[q] : 1;
+      if (v[q] < m) v[q] = v[q] >= m * 0.5f ? m : 0;
+      o[q] = (uint8_t)min(255.0f, v[q] + 0.5f);
+    }
+  }
+  return ledA.Color(o[0], o[1], o[2]);
+}
 void hubLedTick() {
   static uint32_t last = 0, shown = 0xFFFFFFFF; if (millis() - last < 20) return; last = millis();
   if (resetArmed()) {                                       // BOOT held: factory reset is armed
@@ -2763,8 +2855,11 @@ void hubLedTick() {
   bool upd = Update.isRunning() || eota.active, rst = restartAt != 0;
   if (upd || rst) { uint8_t pk = max<uint8_t>(peak, 6); k = (millis() / 100) % 2 ? pk : 0; r = upd ? 0 : 1; g = 1; b = 1; }
   // channel at brightness k, never below the calibrated minimum while that colour is lit
-  auto ch = [](uint8_t col, uint8_t k, int c) -> uint8_t { if (!col || !k) return 0; int v = (col * k + 127) / 255; int m = gMin[c] ? gMin[c] : 1; return (uint8_t)min(255, max(v, m)); };
-  uint32_t c = r == 255 ? ledA.Color(ch(gOk[0], k, 0), ch(gOk[1], k, 1), ch(gOk[2], k, 2)) : ledA.Color(ch(r * 255, k, 0), ch(g * 255, k, 1), ch(b * 255, k, 2));
+  uint32_t c = r == 255 ? calColor(gOk[0], gOk[1], gOk[2], k) : calColor(r * 255, g * 255, b * 255, k);
+  if (emMode && emHub && !upd && !rst) {                      // emergency light: chosen colour, full power, day or night
+    bool on = emMode == 1 || (emMode == 2 && millis() % 140 < 50) || (emMode == 3 && millis() % 1000 < 500);
+    c = on ? ledA.Color(emCol[0], emCol[1], emCol[2]) : 0;
+  }
   if (hubTestUntil && (int32_t)(hubTestUntil - millis()) > 0) {   // calibration test: test colour + test minimums, day or night
     auto t = [](int q) -> uint8_t { if (!hubTestCol[q]) return 0; int v = (hubTestCol[q] * hubTestK + 127) / 255; return (uint8_t)min(255, max(v, (int)hubTestMin[q])); };
     c = ledA.Color(t(0), t(1), t(2));
@@ -2774,6 +2869,7 @@ void hubLedTick() {
 
 void loop() {
   esp_task_wdt_reset();
+  { static uint32_t prev = 0; uint32_t n = millis(); if (prev && (n - prev > loopGap || n - loopGapAt > 30000)) { loopGap = n - prev; loopGapAt = n; } prev = n; }
   hubLedTick();
   resetBtnTick();
   if (factoryPending) hubFactoryReset();
@@ -2826,6 +2922,7 @@ void loop() {
         p.ledDay = gLedDay; p.ledNight = gLedNight; p.litOn = gLitOn; p.litOff = gLitOff;
         p.ledStyle = gLedStyle; p.ledPeriod = gLedPeriod; p.okR = gOk[0]; p.okG = gOk[1]; p.okB = gOk[2];
         p.minR = gMin[0]; p.minG = gMin[1]; p.minB = gMin[2];
+        { DevGuard g; bool on = emMode && (!emChosen || devs[i].em); p.emMode = on ? emMode : 0; p.emR = emCol[0]; p.emG = emCol[1]; p.emB = emCol[2]; }
         sendSigned(i, &p, sizeof(p));
       }
     }
@@ -2852,7 +2949,17 @@ void loop() {
       roomLight = room; stateDirty = true;
       if (room != 255 && room != savedRoom) { savedRoom = room; prefs.putUChar("room", room); }   // for the next power-on glow
     }
-    if (mask != prevOnline) { prevOnline = mask; stateDirty = true; }
+    if (mask != prevOnline) {                 // log every online / offline change, with what the hub saw
+      uint32_t chg = mask ^ prevOnline; prevOnline = mask; stateDirty = true;
+      for (int i = 0; i < MAX_DEV; ++i) if (chg & (1u << i)) {
+        String dn; int rs; uint32_t ago, since; bool on = mask & (1u << i);
+        { DevGuard g; Dev& d = devs[i]; dn = d.name; rs = d.rssi; ago = millis() - d.lastSeen; since = d.offSince; d.offSince = on ? 0 : millis(); }
+        if (on) { if (since) activity(dn + " back online after " + String((millis() - since + 500) / 1000) + " s (signal " + String(rs) + " dBm)", false); }
+        else activity(dn + " offline: nothing heard for " + String(ago / 1000) + " s (last signal " + String(rs) + " dBm" +
+                      (loopGap > 1500 ? ", hub was busy " + String(loopGap) + " ms" : String("")) + (rxDrops ? ", " + String(rxDrops) + " packets dropped by the hub" : String("")) + ")", false);
+        rxDrops = 0;
+      }
+    }
     static bool prevLock = false; bool lk = lockActive();
     if (lk != prevLock) { prevLock = lk; stateDirty = true; if (lockSched && !lockManual) activity(String("Night lock ") + (lk ? "started" : "ended") + " (schedule)", false); }
     if (millis() < pairingUntil + 1500) stateDirty = true;    // countdown in the UI
